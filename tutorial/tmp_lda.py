@@ -2,6 +2,10 @@
 """
 Created on 2024-07-30 (Tue) 20:04:17
 
+# Latent Dirichlet Allocation + collapsed Gibbs sampling
+# This code is available under the MIT License.
+# (c)2010-2011 Nakatani Shuyo / Cybozu Labs Inc.
+
 @author: I.Azuma
 """
 
