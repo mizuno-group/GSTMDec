@@ -5,6 +5,34 @@ from gensim.models.coherencemodel import CoherenceModel
 import requests
 from sklearn.decomposition import PCA
 
+import torch
+
+def get_batches(train_data, batch_size=300, rand=True, device="cuda:0"):
+    """
+    (
+        train_data,
+        train_label,
+        train_text,
+    ) = reader.get_sparse_matrix("train+valid", mode="count")
+    """
+    n, d = train_data.shape
+
+    batchs = n // batch_size
+    while True:
+        idxs = np.arange(train_data.shape[0])
+
+        if rand:
+            np.random.shuffle(idxs)
+
+        for count in range(batchs):
+            wordcount = []
+            beg = count * batch_size
+            end = (count + 1) * batch_size
+
+            idx = idxs[beg:end]
+            data = train_data[idx].toarray()
+            data = torch.from_numpy(data).to(device)
+            yield data
 
 def compute_overlap(level1, level2):
     sum_overlap_score = 0.0
@@ -205,7 +233,7 @@ def compute_clnpmi(level1, level2, doc_word):
             sum_score = 0
         sum_coherence_score += sum_score
     return sum_coherence_score / 3
-    
+
 def build_embedding(embedding_fn, vocab, data_dir):
     print(f"building embedding matrix for dict {len(vocab)} if need...")
     embedding_mat_fn = os.path.join(data_dir, f"embedding_mat_{len(vocab)}.npy")
