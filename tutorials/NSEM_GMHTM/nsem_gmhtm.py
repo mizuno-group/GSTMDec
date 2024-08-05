@@ -522,7 +522,7 @@ class AMM_no_dag(object):
 
         self.reader = reader
         self.model_path = model_path
-        self.n_classes = self.reader.get_n_classes()  # document class
+        #self.n_classes = self.reader.get_n_classes()  # document class
         self.topic_num_1 = topic_num_1
         self.topic_num_2 = topic_num_2
         self.topic_num_3 = topic_num_3
