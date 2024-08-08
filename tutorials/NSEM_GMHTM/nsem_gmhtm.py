@@ -341,16 +341,16 @@ class net(nn.Module):
         self.eta = nn.Linear(vocab_num, 3)  #n
 
         self.adj_A = nn.Parameter(
-            Variable(torch.from_numpy(adj_A).double(), requires_grad=True, name="adj_A")
+            Variable(torch.from_numpy(adj_A).float(), requires_grad=True, name="adj_A")
         )
         self.adj_A_2 = nn.Parameter(
             Variable(
-                torch.from_numpy(adj_A_2).double(), requires_grad=True, name="adj_A_2"
+                torch.from_numpy(adj_A_2).float(), requires_grad=True, name="adj_A_2"
             )
         )
         self.adj_A_3 = nn.Parameter(
             Variable(
-                torch.from_numpy(adj_A_3).double(), requires_grad=True, name="adj_A_3"
+                torch.from_numpy(adj_A_3).float(), requires_grad=True, name="adj_A_3"
             )
         )
 
@@ -498,6 +498,7 @@ class AMM_no_dag(object):
     def __init__(
         self,
         reader=None,
+        vocab_dict=None,
         max_topic_num=64,
         model_path=None,
         emb_mat=None,
@@ -516,11 +517,8 @@ class AMM_no_dag(object):
         threshold_2=None,
         **kwargs,
     ):
-        # prepare dataset
-        if reader == None:
-            raise Exception(" [!] Expected data reader")
-
         self.reader = reader
+        self.vocab_dict = vocab_dict,
         self.model_path = model_path
         #self.n_classes = self.reader.get_n_classes()  # document class
         self.topic_num_1 = topic_num_1
@@ -596,7 +594,6 @@ class AMM_no_dag(object):
         self.pi_ave = np.load(f"{self.model_path}/pi_ave.npy")
         print("AMM_no_dag model loaded from {}.".format(model_path))
 
-
     def get_word_topic(self, data):
         word_topic = self.Net.infer(torch.from_numpy(data).to(device))
         word_topic = self.to_np(word_topic)
@@ -607,12 +604,12 @@ class AMM_no_dag(object):
         topic_dist = self.Net.get_topic_word_dist(level)
         return topic_dist
 
-    def get_topic_word(self, level=2, top_k=15, vocab=None):
+    def get_topic_word(self, level=2, top_k=15, vocab_dict=None):
         topic_dist = self.get_topic_dist(level)
         vals, indices = torch.topk(topic_dist, top_k, dim=1)
         indices = self.to_np(indices).tolist()
         topic_words = [
-            [self.reader.vocab[idx] for idx in indices[i]]
+            [vocab_dict[idx] for idx in indices[i]]
             for i in range(topic_dist.shape[0])
         ]
         return topic_words
@@ -621,21 +618,17 @@ class AMM_no_dag(object):
         return 0
 
     def evaluate(self):
-        # 重定向回文件
-        _, _, texts = self.reader.get_sequence("all")
-
         for level in range(3):
             topic_word = self.get_topic_word(
-                top_k=10, level=level, vocab=self.reader.vocab
+                top_k=10, level=level, vocab_dict=self.vocab_dict
             )
-            # 打印top N的主题词
             for k, top_word_k in enumerate(topic_word):
                 print(f"Topic {k}:{top_word_k}")
 
     # NPMI
-    def sampling(self, flag, best_coherence=-1):
+    def sampling(self, flag, best_coherence=-1, test_data=None):
 
-        test_data, test_label, _ = self.reader.get_matrix("test", mode="count")
+        #test_data, test_label, _ = self.reader.get_matrix("test", mode="count")
 
         # for level in range(3):
         topic_dist_2 = self.to_np(self.get_topic_dist(level=2)) 
@@ -673,26 +666,3 @@ class AMM_no_dag(object):
             self.save_model()
 
         pass
-
-    def get_batches(self, batch_size=300, rand=True):
-        """
-        Moved to 'utils.get_batches()'.
-        """
-        n, d = self.train_data.shape
-
-        batchs = n // batch_size
-        while True:
-            idxs = np.arange(self.train_data.shape[0])
-
-            if rand:
-                np.random.shuffle(idxs)
-
-            for count in range(batchs):
-                wordcount = []
-                beg = count * batch_size
-                end = (count + 1) * batch_size
-
-                idx = idxs[beg:end]
-                data = self.train_data[idx].toarray()
-                data = torch.from_numpy(data).to(device)
-                yield data
