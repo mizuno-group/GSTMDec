@@ -51,7 +51,7 @@ class TextReader():
 				if line == '':
 					continue
 				label, text = line.strip().split('\t',1)
-				text = list(gensim.utils.tokenize(text, lower=True)) # 分词
+				text = list(gensim.utils.tokenize(text, lower=True))
 				texts.append(text)
 				labels.append(label)
 
