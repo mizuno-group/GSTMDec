@@ -518,12 +518,15 @@ class AMM_no_dag(object):
         **kwargs,
     ):
         self.reader = reader
-        self.vocab_dict = vocab_dict,
+        self.vocab_dict = vocab_dict
         self.model_path = model_path
         #self.n_classes = self.reader.get_n_classes()  # document class
         self.topic_num_1 = topic_num_1
         self.topic_num_2 = topic_num_2
         self.topic_num_3 = topic_num_3
+
+        self.epochs = epochs
+        self.learning_rate = learning_rate
 
         self.adj = self.initalize_A(topic_num_1)
         self.adj_2 = self.initalize_A(topic_num_2)  # topic_num_2
@@ -579,8 +582,14 @@ class AMM_no_dag(object):
         if not os.path.exists(self.model_path):
             os.makedirs(self.model_path)
         torch.save(self.Net.state_dict(), f"{self.model_path}/model.pkl")
-        with open(f"{self.model_path}/topic_num.txt", "w") as f:
-            f.write(str(self.topic_num))
+        with open(f"{self.model_path}/info.txt", "w") as f:
+            f.write(f"Topic Num 1: {str(self.topic_num_1)}\n")
+            f.write(f"Topic Num 2: {str(self.topic_num_2)}\n")
+            f.write(f"Topic Num 3: {str(self.topic_num_3)}\n")
+            f.write(f"Epochs: {str(self.epochs)}\n")
+            f.write(f"Learning Rate: {str(self.learning_rate)}\n")
+            f.write(str(self.Net))
+
         np.save(f"{self.model_path}/pi_ave.npy", self.pi_ave)
         print(f"Models save to  {self.model_path}/model.pkl")
 
@@ -589,15 +598,10 @@ class AMM_no_dag(object):
 
         self.Net.load_state_dict(torch.load(model_path))
         # self.Net = torch.load(model_path)
-        with open(f"{self.model_path}/topic_num.txt", "r") as f:
+        with open(f"{self.model_path}/info.txt", "r") as f:
             self.topic_num = int(f.read())
         self.pi_ave = np.load(f"{self.model_path}/pi_ave.npy")
         print("AMM_no_dag model loaded from {}.".format(model_path))
-
-    def get_word_topic(self, data):
-        word_topic = self.Net.infer(torch.from_numpy(data).to(device))
-        word_topic = self.to_np(word_topic)
-        return word_topic
 
     def get_topic_dist(self, level=2):
         # topic_dist = self.Net.get_topic_dist()[self.topics]
@@ -660,9 +664,14 @@ class AMM_no_dag(object):
             print("Topic coherence  level 0: ", train_coherence_0)
         
         print("Topic coherence:", train_coherence)
-        if (train_coherence_2 + train_coherence_1 + train_coherence_0)/3 > best_coherence:
-            best_coherence = (train_coherence_2 + train_coherence_1 + train_coherence_0)/3
+        avg_coherence = (train_coherence_2 + train_coherence_1 + train_coherence_0)/3
+        print("Avg. coherence:", avg_coherence)
+
+        if avg_coherence > best_coherence:
+            best_coherence = avg_coherence
             print("New best coherence found!!")
             self.save_model()
 
-        pass
+        return best_coherence
+
+# %%
