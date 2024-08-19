@@ -59,13 +59,18 @@ def kl_loss(z_mean, z_stddev):
 
 class LossFunctions:
     def reconstruction_loss(self, real, predicted, dropout_mask=None, rec_type="mse"):
-        if rec_type == "mse":
+        if rec_type == "ce_sum":
+            loss = -torch.sum(torch.log(predicted) * real)
+        elif rec_type == "ce_mean":
+            loss = -torch.mean(torch.log(predicted) * real)
+        elif rec_type == "mse":
             if dropout_mask is None:
-                loss = -torch.sum(torch.log(predicted) * real)
+                loss = torch.sum((real - predicted).pow(2)).mean()
             else:
                 loss = torch.sum((real - predicted).pow(2) * dropout_mask) / torch.sum(
                     dropout_mask
                 )
+
         elif rec_type == "bce":
             loss = F.binary_cross_entropy(predicted, real, reduction="none").mean()
         else:
@@ -173,24 +178,24 @@ class Gaussian(nn.Module):
 
 # Encoder
 class InferenceNet(nn.Module):
-    def __init__(self,topic_num_1,topic_num_2,topic_num_3, y_dim, nonLinear):
+    def __init__(self,topic_num_1,topic_num_2,topic_num_3,hidden_num,y_dim,nonLinear):
         super(InferenceNet, self).__init__()
         self.encoder = nn.Sequential(nn.Linear(topic_num_1,topic_num_2), nn.BatchNorm1d(topic_num_2), nonLinear)
         self.encoder_2 = nn.Sequential(nn.Linear(topic_num_2,topic_num_3), nn.BatchNorm1d(topic_num_3), nonLinear)
         self.inference_qyx3 = torch.nn.ModuleList(
             [
-                nn.Linear(topic_num_3, 300),  # 64 1
-                nn.BatchNorm1d(300),
+                nn.Linear(topic_num_3, hidden_num),  # 64 1
+                nn.BatchNorm1d(hidden_num),
                 nonLinear,
-                GumbelSoftmax(300, y_dim),  # 1 256
+                GumbelSoftmax(hidden_num, y_dim),  # 1 256
             ]
         )
         self.inference_qzyx3 = torch.nn.ModuleList(
             [
-                nn.Linear(topic_num_3 + y_dim, 300),
-                nn.BatchNorm1d(300),
+                nn.Linear(topic_num_3 + y_dim, hidden_num),
+                nn.BatchNorm1d(hidden_num),
                 nonLinear,
-                Gaussian(300, topic_num_3),
+                Gaussian(hidden_num, topic_num_3),
             ]
         )
 
@@ -379,7 +384,7 @@ class net(nn.Module):
         self.encoder = nn.Sequential(nn.Linear(vocab_num, topic_num_1), nn.BatchNorm1d(topic_num_1), nn.Tanh())
         y_dim = 10  # x:  y:  z: # FIXME ??
 
-        self.inference = InferenceNet(topic_num_1,topic_num_2,topic_num_3,y_dim,nn.Tanh())
+        self.inference = InferenceNet(topic_num_1,topic_num_2,topic_num_3,hidden_num,y_dim,nn.Tanh())
         self.generative = GenerativeNet(topic_num_1,topic_num_2,topic_num_3,y_dim,nn.Tanh())
 
         self.losses = LossFunctions()
@@ -492,7 +497,7 @@ class net(nn.Module):
         dec_res, theta_res, phi_res = self.decode(x_ori,dec_1,dec_2,dec_3)
 
         loss_rec_1 = self.losses.reconstruction_loss(
-            x_ori, dec_res, dropout_mask, "mse"
+            x_ori, dec_res, dropout_mask, "ce_mean"
         )
         loss_gauss_3 = (
             self.losses.gaussian_loss(
@@ -548,9 +553,9 @@ class AMM_no_dag(object):
         self.epochs = epochs
         self.learning_rate = learning_rate
 
-        self.adj = self.initalize_A(topic_num_1)
-        self.adj_2 = self.initalize_A(topic_num_2)  # topic_num_2
-        self.adj_3 = self.initalize_A(topic_num_3)  # topic_num_3
+        self.adj = self.initialize_A(topic_num_1)
+        self.adj_2 = self.initialize_A(topic_num_2)  # topic_num_2
+        self.adj_3 = self.initialize_A(topic_num_3)  # topic_num_3
         print("AMM_no_dag init model.")
 
         if emb_mat is None:
@@ -584,7 +589,7 @@ class AMM_no_dag(object):
         self.lr = learning_rate
         # optimizer uses ADAM
 
-    def initalize_A(self, topic_nums=16):
+    def initialize_A(self, topic_nums=16):
         A = np.ones([topic_nums, topic_nums]) / (topic_nums - 1) + (
             np.random.rand(topic_nums * topic_nums) * 0.0002
         ).reshape([topic_nums, topic_nums])
