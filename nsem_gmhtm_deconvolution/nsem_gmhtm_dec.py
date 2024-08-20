@@ -176,6 +176,23 @@ class Gaussian(nn.Module):
         logvar = self.var(x)
         return mu, logvar
 
+def temp_softmax(logits, temperature=1.0, dim=-1):
+    """
+    Computes the softmax with a temperature parameter.
+    
+    Args:
+        logits (torch.Tensor): The input tensor (logits).
+        temperature (float): The temperature parameter. Default is 1.0.
+        dim (int): The dimension along which softmax will be computed. Default is -1.
+        
+    Returns:
+        torch.Tensor: The softmax probabilities with temperature scaling.
+    """
+    # Apply temperature scaling
+    scaled_logits = logits / temperature
+    # Apply softmax
+    return F.softmax(scaled_logits, dim=dim)
+
 # Encoder
 class InferenceNet(nn.Module):
     def __init__(self,topic_num_1,topic_num_2,topic_num_3,hidden_num,y_dim,nonLinear):
@@ -223,7 +240,7 @@ class InferenceNet(nn.Module):
         return concat
 
 
-    def forward(self, x, adj, adj_2, adj_3, temperature, hard = 0):
+    def forward(self, x, adj, adj_2, adj_3, temperature, hard=0):
         if inv_flag ==True:
             x_1 = torch.matmul(adj.to(torch.float32),x.squeeze(2).T).T
             x_2 = self.encoder(x_1)
@@ -401,14 +418,22 @@ class net(nn.Module):
     def to_np(self,x):
         return x.cpu().detach().numpy()
 
-    def get_topic_word_dist(self, level=2):
+    def get_topic_word_dist(self, level=2, temperature=1.2):
         """ Phi : (n_topics, V)"""
+        """
         if level == 2:
             return torch.softmax(self.topic_embed_2 @ self.word_embed, dim=1)
         elif level == 1:
             return torch.softmax(self.topic_embed_1 @ self.word_embed, dim=1)
         elif level == 0:
             return torch.softmax(self.topic_embed @ self.word_embed, dim=1)
+        """
+        if level == 2:
+            return temp_softmax(self.topic_embed_2 @ self.word_embed, temperature=temperature)
+        elif level == 1:
+            return temp_softmax(self.topic_embed_1 @ self.word_embed, temperature=temperature)
+        elif level == 0:
+            return temp_softmax(self.topic_embed @ self.word_embed, temperature=temperature)
     
     def get_doc_topic_dist(self, level=2):
         """ Theta : (batch_size, n_topics)"""
@@ -423,7 +448,7 @@ class net(nn.Module):
         p1 = self.encoder(x)
         return p1
 
-    def decode(self, x_ori, out_1, out_2, out_3):
+    def decode_stable(self, x_ori, out_1, out_2, out_3):
         out_1 = torch.softmax(out_1, dim=1)  # NOTE: theta
         out_2 = torch.softmax(out_2, dim=1)
         out_3 = torch.softmax(out_3, dim=1)
@@ -436,6 +461,28 @@ class net(nn.Module):
         beta_1 = torch.softmax(self.topic_embed @ self.word_embed, dim=1)  # NOTE: phi
         beta_2 = torch.softmax(self.topic_embed_1 @ self.word_embed, dim=1)
         beta_3 = torch.softmax(self.topic_embed_2 @ self.word_embed, dim=1)
+        phi_res = {"phi_1":beta_1,"phi_2":beta_2,"phi_3":beta_3}
+
+        p1 = out_3 @ beta_1 
+        p2 = out_2 @ beta_2 
+        p3 = out_1 @ beta_3
+        p_fin = (p1.T+p2.T+p3.T)/3.0
+
+        return p_fin.T, theta_res, phi_res
+    
+    def decode(self, x_ori, out_1, out_2, out_3, temperature=1.2):
+        out_1 = temp_softmax(out_1, temperature=temperature)  # NOTE: theta
+        out_2 = temp_softmax(out_2, temperature=temperature)
+        out_3 = temp_softmax(out_3, temperature=temperature)
+        theta_res = {"theta_1":out_1,"theta_2":out_2,"theta_3":out_3}
+
+        self.theta_1 = out_1
+        self.theta_2 = out_2
+        self.theta_3 = out_3
+
+        beta_1 = temp_softmax(self.topic_embed @ self.word_embed, temperature=temperature)  # NOTE: phi
+        beta_2 = temp_softmax(self.topic_embed_1 @ self.word_embed, temperature=temperature)
+        beta_3 = temp_softmax(self.topic_embed_2 @ self.word_embed, temperature=temperature)
         phi_res = {"phi_1":beta_1,"phi_2":beta_2,"phi_3":beta_3}
 
         p1 = out_3 @ beta_1 
