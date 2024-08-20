@@ -350,7 +350,6 @@ class GenerativeNet(nn.Module):
 
         return output_1, output_2, output_3, output_4
 
-
 class net(nn.Module):
     def __init__(
         self,
@@ -470,7 +469,7 @@ class net(nn.Module):
 
         return p_fin.T, theta_res, phi_res
     
-    def decode(self, x_ori, out_1, out_2, out_3, temperature=1.5):
+    def decode(self, x_ori, out_1, out_2, out_3, temperature=1.0):
         out_1 = temp_softmax(out_1, temperature=temperature)  # NOTE: theta
         out_2 = temp_softmax(out_2, temperature=temperature)
         out_3 = temp_softmax(out_3, temperature=temperature)
