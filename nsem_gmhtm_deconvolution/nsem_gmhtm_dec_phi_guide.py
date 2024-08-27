@@ -4,6 +4,8 @@ Created on 2024-08-02 (Fri) 10:19:29
 
 NSEM-GMHTM: Nonlinear Structural Equation Model guided Gaussian Mixture Hierarchical Topic Model
 
+The topic-word distribution φ is treated as a single variable.
+
 @author: I.Azuma
 """
 # %%
@@ -373,16 +375,26 @@ class net(nn.Module):
 
         self.dropout = nn.Dropout(0.1)
         xavier_init = torch.distributions.Uniform(-0.05,0.05)
+        """
         if emb_mat == None:
             self.word_embed = nn.Parameter(torch.rand(hidden_num, vocab_num))
         else:
             print("Using pre-train word embedding")
             self.word_embed = nn.Parameter(emb_mat)
+        """
 
-        self.topic_embed = nn.Parameter(xavier_init.sample((topic_num_1, hidden_num)))
-        self.topic_embed_1 = nn.Parameter(xavier_init.sample((topic_num_2, hidden_num)))
-        self.topic_embed_2 = nn.Parameter(xavier_init.sample((topic_num_3, hidden_num)))
-        self.eta = nn.Linear(vocab_num, 3)  #n
+        if emb_mat == None:
+            self.phi_1 = nn.Parameter(xavier_init.sample((topic_num_1, vocab_num)))
+        else:
+            print("Using pre-train word embedding")
+            self.phi_1 = nn.Parameter(emb_mat)
+            
+        self.phi_2 = nn.Parameter(xavier_init.sample((topic_num_2, vocab_num)))
+        self.phi_3 = nn.Parameter(xavier_init.sample((topic_num_3, vocab_num)))
+
+        #self.topic_embed = nn.Parameter(xavier_init.sample((topic_num_1, hidden_num)))
+        #self.topic_embed_1 = nn.Parameter(xavier_init.sample((topic_num_2, hidden_num)))
+        #self.topic_embed_2 = nn.Parameter(xavier_init.sample((topic_num_3, hidden_num)))
 
         self.adj_A = nn.Parameter(
             Variable(torch.from_numpy(adj_A).float(), requires_grad=True, name="adj_A")
@@ -420,20 +432,13 @@ class net(nn.Module):
 
     def get_topic_word_dist(self, level=2, temperature=1.0):
         """ Phi : (n_topics, V)"""
-        """
         if level == 2:
-            return torch.softmax(self.topic_embed_2 @ self.word_embed, dim=1)
+            return torch.softmax(self.phi_1, dim=1)
         elif level == 1:
-            return torch.softmax(self.topic_embed_1 @ self.word_embed, dim=1)
+            return torch.softmax(self.phi_2, dim=1)
         elif level == 0:
-            return torch.softmax(self.topic_embed @ self.word_embed, dim=1)
-        """
-        if level == 2:
-            return temp_softmax(self.topic_embed_2 @ self.word_embed, temperature=temperature)
-        elif level == 1:
-            return temp_softmax(self.topic_embed_1 @ self.word_embed, temperature=temperature)
-        elif level == 0:
-            return temp_softmax(self.topic_embed @ self.word_embed, temperature=temperature)
+            return torch.softmax(self.phi_3, dim=1)
+
     
     def get_doc_topic_dist(self, level=2):
         """ Theta : (batch_size, n_topics)"""
@@ -448,7 +453,7 @@ class net(nn.Module):
         p1 = self.encoder(x)
         return p1
 
-    def decode_stable(self, x_ori, out_1, out_2, out_3):
+    def decode(self, x_ori, out_1, out_2, out_3):
         out_1 = torch.softmax(out_1, dim=1)  # NOTE: theta
         out_2 = torch.softmax(out_2, dim=1)
         out_3 = torch.softmax(out_3, dim=1)
@@ -458,31 +463,15 @@ class net(nn.Module):
         self.theta_2 = out_2
         self.theta_3 = out_3
 
+        """
         beta_1 = torch.softmax(self.topic_embed @ self.word_embed, dim=1)  # NOTE: phi
         beta_2 = torch.softmax(self.topic_embed_1 @ self.word_embed, dim=1)
         beta_3 = torch.softmax(self.topic_embed_2 @ self.word_embed, dim=1)
-        phi_res = {"phi_1":beta_1,"phi_2":beta_2,"phi_3":beta_3}
+        """
+        beta_1 = torch.softmax(self.phi_1, dim=1) 
+        beta_2 = torch.softmax(self.phi_2, dim=1) 
+        beta_3 = torch.softmax(self.phi_3, dim=1) 
 
-        p1 = out_3 @ beta_1 
-        p2 = out_2 @ beta_2 
-        p3 = out_1 @ beta_3
-        p_fin = (p1.T+p2.T+p3.T)/3.0
-
-        return p_fin.T, theta_res, phi_res
-    
-    def decode(self, x_ori, out_1, out_2, out_3, temperature=1.0):
-        out_1 = temp_softmax(out_1, temperature=temperature)  # NOTE: theta
-        out_2 = temp_softmax(out_2, temperature=temperature)
-        out_3 = temp_softmax(out_3, temperature=temperature)
-        theta_res = {"theta_1":out_1,"theta_2":out_2,"theta_3":out_3}
-
-        self.theta_1 = out_1
-        self.theta_2 = out_2
-        self.theta_3 = out_3
-
-        beta_1 = temp_softmax(self.topic_embed @ self.word_embed, temperature=temperature)  # NOTE: phi
-        beta_2 = temp_softmax(self.topic_embed_1 @ self.word_embed, temperature=temperature)
-        beta_3 = temp_softmax(self.topic_embed_2 @ self.word_embed, temperature=temperature)
         phi_res = {"phi_1":beta_1,"phi_2":beta_2,"phi_3":beta_3}
 
         p1 = out_3 @ beta_1 
@@ -626,7 +615,7 @@ class AMM_no_dag(object):
                 topic_num_1=self.topic_num_1,
                 topic_num_2=self.topic_num_2,
                 topic_num_3=self.topic_num_3,
-                emb_mat=emb_mat.T,
+                emb_mat=emb_mat,
                 **kwargs,
             ).to(device)
 
@@ -742,5 +731,37 @@ class AMM_no_dag(object):
             self.save_model()
 
         return best_coherence
+    
+    def loss_eval(self, flag, best_score=np.inf, test_data=None, now_score=None):
+
+        #test_data, test_label, _ = self.reader.get_matrix("test", mode="count")
+
+        # for level in range(3):
+        topic_dist_2 = self.to_np(self.get_topic_dist(level=2)) 
+        topic_dist_1 = self.to_np(self.get_topic_dist(level=1))
+        topic_dist_0 = self.to_np(self.get_topic_dist(level=0))
+
+        # concat each level
+        topic_dist = np.concatenate(
+            (np.concatenate((topic_dist_2, topic_dist_1), axis=0), topic_dist_0), axis=0
+        )
+
+        if flag == 1:
+            TU2 = utils.evaluate_TU(topic_dist_2)
+            TU1 = utils.evaluate_TU(topic_dist_1)
+            TU0 = utils.evaluate_TU(topic_dist_0)
+            TU = utils.evaluate_TU(topic_dist)
+
+            print("TU level 2: " + str(TU2))
+            print("TU level 1: " + str(TU1))
+            print("TU level 0: " + str(TU0))
+            print("TU: " + str(TU))
+
+        if best_score > now_score:
+            best_score = now_score
+            print("New best loss found!!")
+            self.save_model()
+
+        return best_score
 
 # %%
