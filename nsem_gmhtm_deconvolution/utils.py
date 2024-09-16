@@ -4,8 +4,8 @@ import os
 from gensim.models.coherencemodel import CoherenceModel
 import requests
 from sklearn.decomposition import PCA
-
 import torch
+from scipy.sparse import csr_matrix
 
 def get_batches(train_data, batch_size=300, rand=True, device="cuda:0"):
     """
@@ -30,9 +30,13 @@ def get_batches(train_data, batch_size=300, rand=True, device="cuda:0"):
             end = (count + 1) * batch_size
 
             idx = idxs[beg:end]
-            data = train_data[idx].toarray()
+            # data format
+            if isinstance(train_data, csr_matrix):
+                data = train_data[idx].toarray()  # csr_matrix
+            else:
+                data = train_data[idx]  # NumPy
             data = torch.from_numpy(data).to(device)
-            yield data
+            yield idx, data  # update 240915
 
 def compute_overlap(level1, level2):
     sum_overlap_score = 0.0
@@ -400,3 +404,4 @@ def plot_loss(history):
     plt.ylabel('Loss')
     plt.xlabel('Epoch')
     plt.legend(['Train', 'Valid'], loc="best")
+    plt.show()

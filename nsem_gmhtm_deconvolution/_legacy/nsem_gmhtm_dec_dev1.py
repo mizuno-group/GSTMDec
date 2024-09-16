@@ -382,15 +382,18 @@ class net(nn.Module):
             print("Using pre-train word embedding")
             self.word_embed = nn.Parameter(emb_mat)
         """
-
+        """ Guide phi_1 when initialization
         if emb_mat == None:
             self.phi_1 = nn.Parameter(xavier_init.sample((topic_num_1, vocab_num)))
         else:
             print("Using pre-train word embedding")
             self.phi_1 = nn.Parameter(emb_mat)
-            
+        """
+        self.phi_1 = nn.Parameter(xavier_init.sample((topic_num_1, vocab_num)))
         self.phi_2 = nn.Parameter(xavier_init.sample((topic_num_2, vocab_num)))
         self.phi_3 = nn.Parameter(xavier_init.sample((topic_num_3, vocab_num)))
+
+        self.emb_mat = emb_mat
 
         #self.topic_embed = nn.Parameter(xavier_init.sample((topic_num_1, hidden_num)))
         #self.topic_embed_1 = nn.Parameter(xavier_init.sample((topic_num_2, hidden_num)))
@@ -468,7 +471,7 @@ class net(nn.Module):
         beta_2 = torch.softmax(self.topic_embed_1 @ self.word_embed, dim=1)
         beta_3 = torch.softmax(self.topic_embed_2 @ self.word_embed, dim=1)
         """
-        beta_1 = torch.softmax(self.phi_1, dim=1) 
+        beta_1 = torch.softmax(self.phi_1 + self.emb_mat, dim=1)  # guide for each decoder
         beta_2 = torch.softmax(self.phi_2, dim=1) 
         beta_3 = torch.softmax(self.phi_3, dim=1) 
 

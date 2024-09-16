@@ -173,3 +173,17 @@ class KFoldTorch:
             print('Best model already saved for fold %d'%(self.best_cv), flush=True)
 
         return
+
+# %%
+def calc_deconv_loss(theta_tensor, prop_tensor):
+    ext_theta = theta_tensor[:,0:prop_tensor.shape[1]]
+
+    mse = torch.mean((ext_theta - prop_tensor) ** 2)
+    rmse = torch.sqrt(mse)
+    cel = -torch.mean(torch.log(ext_theta) * prop_tensor)
+
+    cos_sim = 1 - F.cosine_similarity(ext_theta, prop_tensor)
+    cos_sim = cos_sim.mean()
+
+    return {'mse':mse, 'rmse':rmse, 'cel':cel, 'cos_sim':cos_sim}
+    
