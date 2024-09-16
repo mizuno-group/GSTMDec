@@ -255,6 +255,7 @@ class InferenceNet(nn.Module):
         logits_3, prob_3, y_3  = self.qyx3(x_3,temperature, hard = 0)
         mu_3, logvar_3 = self.qzxy3(x_3.view(x_3.size(0), -1, 1), y_3)
         var_3 = torch.exp(logvar_3)
+        # reparameter: td1
         z_3 = self.reparameterize(mu_3, var_3)
         output_3 = {"mean": mu_3, "var": var_3, "gaussian": z_3, "categorical": y_3,'logits': logits_3, 'prob_cat': prob_3}
         return output_3   
@@ -404,6 +405,10 @@ class net(nn.Module):
         self.inference = InferenceNet(topic_num_1,topic_num_2,topic_num_3,hidden_num,y_dim,nn.Tanh())
         self.generative = GenerativeNet(topic_num_1,topic_num_2,topic_num_3,y_dim,nn.Tanh())
 
+        # MLP
+        self.fc1 = nn.Linear(vocab_num, hidden_num)
+        self.fc2 = nn.Linear(hidden_num, 6)  # output_num: number of cell types
+
         self.losses = LossFunctions()
         for m in self.modules():
             if (
@@ -447,7 +452,7 @@ class net(nn.Module):
     def encode(self, x):
         p1 = self.encoder(x)
         return p1
-
+    
     def decode_stable(self, x_ori, out_1, out_2, out_3):
         out_1 = torch.softmax(out_1, dim=1)  # NOTE: theta
         out_2 = torch.softmax(out_2, dim=1)
@@ -469,20 +474,22 @@ class net(nn.Module):
         p_fin = (p1.T+p2.T+p3.T)/3.0
 
         return p_fin.T, theta_res, phi_res
-    
-    def decode(self, x_ori, out_1, out_2, out_3, temperature=1.0):
-        out_1 = temp_softmax(out_1, temperature=temperature)  # NOTE: theta
-        out_2 = temp_softmax(out_2, temperature=temperature)
-        out_3 = temp_softmax(out_3, temperature=temperature)
+
+    def decode(self, x_ori, out_1, out_2, out_3):
+        out_1 = torch.softmax(out_1, dim=1)
+        #out_1 = torch.nn.functional.normalize(out_1, p=2, dim=1)
+        out_2 = torch.softmax(out_2, dim=1)
+        out_3 = torch.softmax(out_3, dim=1)
+
         theta_res = {"theta_1":out_1,"theta_2":out_2,"theta_3":out_3}
 
         self.theta_1 = out_1
         self.theta_2 = out_2
         self.theta_3 = out_3
 
-        beta_1 = temp_softmax(self.topic_embed @ self.word_embed, temperature=temperature)  # NOTE: phi
-        beta_2 = temp_softmax(self.topic_embed_1 @ self.word_embed, temperature=temperature)
-        beta_3 = temp_softmax(self.topic_embed_2 @ self.word_embed, temperature=temperature)
+        beta_1 = torch.softmax(self.topic_embed @ self.word_embed, dim=1)  # NOTE: phi
+        beta_2 = torch.softmax(self.topic_embed_1 @ self.word_embed, dim=1)
+        beta_3 = torch.softmax(self.topic_embed_2 @ self.word_embed, dim=1)
         phi_res = {"phi_1":beta_1,"phi_2":beta_2,"phi_3":beta_3}
 
         p1 = out_3 @ beta_1 
@@ -491,6 +498,7 @@ class net(nn.Module):
         p_fin = (p1.T+p2.T+p3.T)/3.0
 
         return p_fin.T, theta_res, phi_res
+    
 
     def _one_minus_A_t(self, adj):
         adj_normalized = abs(adj) 
@@ -498,6 +506,11 @@ class net(nn.Module):
         return adj_normalized
 
     def forward(self, x, dropout_mask=None, temperature=1.0, hard=0):
+        # simple MLP
+        x_mlp = x
+        x_mlp = torch.relu(self.fc1(x_mlp))
+        x_mlp = self.fc2(x_mlp)
+
         x_ori = x  # >> (batch_size, V)
         x = self.encode(x)  # >> (batch_size, max_topic_n)
         x = x.view(x.size(0), -1, 1)  # (batch_size, max_topic_n, 1)
@@ -538,9 +551,9 @@ class net(nn.Module):
             adj_A_t_inv_3,
         )
 
-        dec_1 = output_1["x_rec"]  # (D, 8)
+        dec_1 = output_1["x_rec"]  # (D, 128)
         dec_2 = output_2["x_rec"]  # (D, 32)
-        dec_3 = output_3["x_rec"]  # (D, 128)
+        dec_3 = output_3["x_rec"]  # (D, 8)
         dec_res, theta_res, phi_res = self.decode(x_ori,dec_1,dec_2,dec_3)
 
         loss_rec_1 = self.losses.reconstruction_loss(
@@ -565,7 +578,7 @@ class net(nn.Module):
         """
         loss_dic = {'recon_loss':loss_rec_1, 'gauss_loss':loss_gauss_3, 'cat_loss':loss_cat_3}
 
-        return loss_dic, dep_mats, theta_res, phi_res
+        return loss_dic, dep_mats, theta_res, phi_res, x_mlp
 
 class AMM_no_dag(object):
     def __init__(
