@@ -4,7 +4,10 @@ Created on 2024-08-02 (Fri) 10:19:29
 
 NSEM-GMHTM: Nonlinear Structural Equation Model guided Gaussian Mixture Hierarchical Topic Model
 
-- add MLP branch
+Version 3
+- Removed MLP branch
+- Phi1, Phi2, Phi3 are now trainable (formerly expressed by topic_emb x word_emb)
+
 
 @author: I.Azuma
 """
@@ -178,23 +181,6 @@ class Gaussian(nn.Module):
         logvar = self.var(x)
         return mu, logvar
 
-def temp_softmax(logits, temperature=1.0, dim=-1):
-    """
-    Computes the softmax with a temperature parameter.
-    
-    Args:
-        logits (torch.Tensor): The input tensor (logits).
-        temperature (float): The temperature parameter. Default is 1.0.
-        dim (int): The dimension along which softmax will be computed. Default is -1.
-        
-    Returns:
-        torch.Tensor: The softmax probabilities with temperature scaling.
-    """
-    # Apply temperature scaling
-    scaled_logits = logits / temperature
-    # Apply softmax
-    return F.softmax(scaled_logits, dim=dim)
-
 # Encoder
 class InferenceNet(nn.Module):
     def __init__(self,topic_num_1,topic_num_2,topic_num_3,hidden_num,y_dim,nonLinear):
@@ -362,7 +348,9 @@ class net(nn.Module):
         adj_A_2=None,
         adj_A_3=None,
         mask=None,
-        emb_mat=None,
+        phi1_mat=None,
+        phi2_mat=None,
+        phi3_mat=None,
         topic_num_1=None,
         topic_num_2=None,
         topic_num_3=None,
@@ -372,20 +360,36 @@ class net(nn.Module):
         **kwargs,
     ):
         super(net, self).__init__()
-        print("net topic_num_1={}".format(topic_num_1))
-
         self.dropout = nn.Dropout(0.1)
         xavier_init = torch.distributions.Uniform(-0.05,0.05)
-        if emb_mat == None:
-            self.word_embed = nn.Parameter(torch.rand(hidden_num, vocab_num))
+        
+        if phi1_mat == None:
+            self.phi_1 = nn.Parameter(xavier_init.sample((topic_num_1, vocab_num)))
         else:
-            print("Using pre-train word embedding")
-            self.word_embed = nn.Parameter(emb_mat)
-
+            self.phi_1 = phi1_mat
+        if phi2_mat == None:
+            self.phi_2 = nn.Parameter(xavier_init.sample((topic_num_2, vocab_num)))
+        else:
+            assert phi2_mat.shape[0] <= topic_num_2
+            phi_2 = nn.Parameter(torch.zeros((topic_num_2, vocab_num)))
+            fixed_rows = phi2_mat.shape[0]
+            """
+            with torch.no_grad():  
+                phi_2.data[:fixed_rows] = torch.tensor(phi2_mat[:fixed_rows], dtype=torch.float32)
+                self.phi_2 = phi_2
+            """
+            phi_2.data[:fixed_rows] = torch.tensor(phi2_mat[:fixed_rows], dtype=torch.float32)
+            self.phi_2 = phi_2
+            print("Use pre-defined phi_2_mat",phi2_mat.shape)
+        if phi3_mat == None:
+            self.phi_3 = nn.Parameter(xavier_init.sample((topic_num_3, vocab_num)))
+        else:
+            self.phi_3 = phi3_mat
+        
+        self.word_embed = nn.Parameter(torch.rand(hidden_num, vocab_num))
         self.topic_embed = nn.Parameter(xavier_init.sample((topic_num_1, hidden_num)))
         self.topic_embed_1 = nn.Parameter(xavier_init.sample((topic_num_2, hidden_num)))
         self.topic_embed_2 = nn.Parameter(xavier_init.sample((topic_num_3, hidden_num)))
-        self.eta = nn.Linear(vocab_num, 3)  #n
 
         self.adj_A = nn.Parameter(
             Variable(torch.from_numpy(adj_A).float(), requires_grad=True, name="adj_A")
@@ -407,10 +411,6 @@ class net(nn.Module):
         self.inference = InferenceNet(topic_num_1,topic_num_2,topic_num_3,hidden_num,y_dim,nn.Tanh())
         self.generative = GenerativeNet(topic_num_1,topic_num_2,topic_num_3,y_dim,nn.Tanh())
 
-        # MLP
-        self.fc1 = nn.Linear(topic_num_3, topic_num_2)
-        self.fc2 = nn.Linear(topic_num_2, topic_num_1)
-
         self.losses = LossFunctions()
         for m in self.modules():
             if (
@@ -425,22 +425,14 @@ class net(nn.Module):
     def to_np(self,x):
         return x.cpu().detach().numpy()
 
-    def get_topic_word_dist(self, level=2, temperature=1.0):
+    def get_topic_word_dist(self, level=2):
         """ Phi : (n_topics, V)"""
-        """
         if level == 2:
-            return torch.softmax(self.topic_embed_2 @ self.word_embed, dim=1)
+            return torch.softmax(self.phi_1, dim=1)
         elif level == 1:
-            return torch.softmax(self.topic_embed_1 @ self.word_embed, dim=1)
+            return torch.softmax(self.phi_2, dim=1)
         elif level == 0:
-            return torch.softmax(self.topic_embed @ self.word_embed, dim=1)
-        """
-        if level == 2:
-            return temp_softmax(self.topic_embed_2 @ self.word_embed, temperature=temperature)
-        elif level == 1:
-            return temp_softmax(self.topic_embed_1 @ self.word_embed, temperature=temperature)
-        elif level == 0:
-            return temp_softmax(self.topic_embed @ self.word_embed, temperature=temperature)
+            return torch.softmax(self.phi_3, dim=1)
     
     def get_doc_topic_dist(self, level=2):
         """ Theta : (batch_size, n_topics)"""
@@ -460,23 +452,31 @@ class net(nn.Module):
         out_2 = torch.softmax(out_2, dim=1)
         out_3 = torch.softmax(out_3, dim=1)
 
-        theta_res = {"theta_1":out_1,"theta_2":out_2,"theta_3":out_3}
+        #theta_res = {"theta_1":out_1,"theta_2":out_2,"theta_3":out_3}
 
         self.theta_1 = out_1
         self.theta_2 = out_2
         self.theta_3 = out_3
 
+        """
+        beta_1 = torch.softmax(self.phi_1, dim=1)  # guide for each decoder
+        beta_2 = torch.softmax(self.phi_2, dim=1) 
+        beta_3 = torch.softmax(self.phi_3, dim=1) 
+        """
+
         beta_1 = torch.softmax(self.topic_embed @ self.word_embed, dim=1)  # NOTE: phi
         beta_2 = torch.softmax(self.topic_embed_1 @ self.word_embed, dim=1)
         beta_3 = torch.softmax(self.topic_embed_2 @ self.word_embed, dim=1)
-        phi_res = {"phi_1":beta_1,"phi_2":beta_2,"phi_3":beta_3}
+
+        #phi_res = {"phi_1":beta_1,"phi_2":beta_2,"phi_3":beta_3}
 
         p1 = out_3 @ beta_1 
         p2 = out_2 @ beta_2 
         p3 = out_1 @ beta_3
         p_fin = (p1.T+p2.T+p3.T)/3.0
+        #p_fin = p2.T
 
-        return p_fin.T, theta_res, phi_res
+        return p_fin.T
     
 
     def _one_minus_A_t(self, adj):
@@ -522,10 +522,6 @@ class net(nn.Module):
         self.z_3 = z_3  # (D, 128) --> Lth layer
         self.y_3 = y_3  # (D, 10) --> categorical dim
 
-        # MLP-branch
-        x_mlp = torch.relu(self.fc1(z_3))
-        x_mlp = self.fc2(x_mlp)
-
         # collect each hd
         output_1, output_2, output_3, dep_mats = self.generative(
             z_3,
@@ -538,7 +534,7 @@ class net(nn.Module):
         dec_1 = output_1["x_rec"]  # (D, 128)
         dec_2 = output_2["x_rec"]  # (D, 32)
         dec_3 = output_3["x_rec"]  # (D, 8)
-        dec_res, theta_res, phi_res = self.decode(x_ori, dec_1, dec_2, dec_3)
+        dec_res = self.decode(x_ori, dec_1, dec_2, dec_3)
 
         loss_rec_1 = self.losses.reconstruction_loss(
             x_ori, dec_res, dropout_mask, "ce_mean"
@@ -555,7 +551,7 @@ class net(nn.Module):
         loss_cat_3 = (-self.losses.entropy(out_inf_1['logits'], out_inf_1['prob_cat']) - np.log(0.1)) 
         loss_dic = {'recon_loss':loss_rec_1, 'gauss_loss':loss_gauss_3, 'cat_loss':loss_cat_3}
 
-        return loss_dic, dep_mats, theta_res, phi_res, x_mlp
+        return loss_dic, dep_mats
 
 class AMM_no_dag(object):
     def __init__(
@@ -563,7 +559,9 @@ class AMM_no_dag(object):
         reader=None,
         vocab_dict=None,
         model_path=None,
-        emb_mat=None,
+        phi1_mat=None,
+        phi2_mat=None,
+        phi3_mat=None,
         topic_num_1=None,
         topic_num_2=None,
         topic_num_3=None,
@@ -587,6 +585,10 @@ class AMM_no_dag(object):
         self.topic_num_2 = topic_num_2
         self.topic_num_3 = topic_num_3
 
+        self.phi1_mat = phi1_mat.to(device) if phi1_mat is not None else None
+        self.phi2_mat = phi2_mat.to(device) if phi2_mat is not None else None
+        self.phi3_mat = phi3_mat.to(device) if phi3_mat is not None else None
+
         self.epochs = epochs
         self.learning_rate = learning_rate
 
@@ -595,30 +597,19 @@ class AMM_no_dag(object):
         self.adj_3 = self.initialize_A(topic_num_3)  # topic_num_3
         print("AMM_no_dag init model.")
 
-        if emb_mat is None:
-            self.Net = net(
-                batch_size,
-                adj_A=self.adj,
-                adj_A_2=self.adj_2,
-                adj_A_3=self.adj_3,
-                topic_num_1=self.topic_num_1,
-                topic_num_2=self.topic_num_2,
-                topic_num_3=self.topic_num_3,
-                **kwargs,
-            ).to(device)
-        else:
-            emb_mat = torch.from_numpy(emb_mat.astype(np.float32)).to(device)
-            self.Net = net(
-                batch_size,
-                adj_A=self.adj,
-                adj_A_2=self.adj_2,
-                adj_A_3=self.adj_3,
-                topic_num_1=self.topic_num_1,
-                topic_num_2=self.topic_num_2,
-                topic_num_3=self.topic_num_3,
-                emb_mat=emb_mat.T,
-                **kwargs,
-            ).to(device)
+        self.Net = net(
+            batch_size,
+            adj_A=self.adj,
+            adj_A_2=self.adj_2,
+            adj_A_3=self.adj_3,
+            topic_num_1=self.topic_num_1,
+            topic_num_2=self.topic_num_2,
+            topic_num_3=self.topic_num_3,
+            phi1_mat=self.phi1_mat,
+            phi2_mat=self.phi2_mat,
+            phi3_mat=self.phi3_mat,
+            **kwargs,
+        ).to(device)
 
         self.pi_ave = 0
         self.epochs = epochs
