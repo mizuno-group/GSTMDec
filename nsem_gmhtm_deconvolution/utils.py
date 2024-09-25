@@ -22,6 +22,8 @@ def get_batches(train_data, batch_size=300, rand=True, device="cuda:0"):
         idxs = np.arange(train_data.shape[0])
 
         if rand:
+            # seed
+            np.random.seed(0)
             np.random.shuffle(idxs)
 
         for count in range(batchs):
