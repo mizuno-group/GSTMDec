@@ -7,7 +7,7 @@ NSEM-GMHTM: Nonlinear Structural Equation Model guided Gaussian Mixture Hierarch
 Version 3
 - Removed MLP branch
 - Phi1, Phi2, Phi3 are now trainable (formerly expressed by topic_emb x word_emb)
-
+    - Representation in one variable increases the number of topics that do not make sense.
 
 @author: I.Azuma
 """
@@ -40,7 +40,7 @@ from tqdm import tqdm
 from pathlib import Path
 BASE_DIR = Path(__file__).parent
 print(BASE_DIR)
-print("!! NSEM-GMHTM Deconvolution !!")
+print("!! NSEM-GMHTM Deconvolution -v3 !!")
 
 import utils
 from customized_linear import CustomizedLinear
@@ -428,11 +428,11 @@ class net(nn.Module):
     def get_topic_word_dist(self, level=2):
         """ Phi : (n_topics, V)"""
         if level == 2:
-            return torch.softmax(self.phi_1, dim=1)
+            return torch.softmax(self.topic_embed @ self.word_embed, dim=1)
         elif level == 1:
-            return torch.softmax(self.phi_2, dim=1)
+            return torch.softmax(self.topic_embed_1 @ self.word_embed, dim=1)
         elif level == 0:
-            return torch.softmax(self.phi_3, dim=1)
+            return torch.softmax(self.topic_embed_2 @ self.word_embed, dim=1)
     
     def get_doc_topic_dist(self, level=2):
         """ Theta : (batch_size, n_topics)"""
@@ -452,23 +452,17 @@ class net(nn.Module):
         out_2 = torch.softmax(out_2, dim=1)
         out_3 = torch.softmax(out_3, dim=1)
 
-        #theta_res = {"theta_1":out_1,"theta_2":out_2,"theta_3":out_3}
-
         self.theta_1 = out_1
         self.theta_2 = out_2
         self.theta_3 = out_3
 
-        """
-        beta_1 = torch.softmax(self.phi_1, dim=1)  # guide for each decoder
-        beta_2 = torch.softmax(self.phi_2, dim=1) 
-        beta_3 = torch.softmax(self.phi_3, dim=1) 
-        """
+        #beta_1 = torch.softmax(self.phi_1, dim=1)  # guide for each decoder
+        #beta_2 = torch.softmax(self.phi_2, dim=1) 
+        #beta_3 = torch.softmax(self.phi_3, dim=1) 
 
         beta_1 = torch.softmax(self.topic_embed @ self.word_embed, dim=1)  # NOTE: phi
         beta_2 = torch.softmax(self.topic_embed_1 @ self.word_embed, dim=1)
         beta_3 = torch.softmax(self.topic_embed_2 @ self.word_embed, dim=1)
-
-        #phi_res = {"phi_1":beta_1,"phi_2":beta_2,"phi_3":beta_3}
 
         p1 = out_3 @ beta_1 
         p2 = out_2 @ beta_2 
