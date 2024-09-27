@@ -37,8 +37,8 @@ from tqdm import tqdm
 
 from pathlib import Path
 BASE_DIR = Path(__file__).parent
-print(BASE_DIR)
-print("!! NSEM-GMHTM Deconvolution -v4 !!")
+#print(BASE_DIR)
+print("!! NSEM-GMHTM Deconvolution -v5 !!")
 
 import utils
 from customized_linear import CustomizedLinear
@@ -405,14 +405,6 @@ class net(nn.Module):
     def to_np(self,x):
         return x.cpu().detach().numpy()
 
-    def get_topic_word_dist(self, level=2):
-        """ Phi : (n_topics, V)"""
-        if level == 2:
-            return  torch.softmax(self.topic_embed @ self.word_embed, dim=1)
-        elif level == 1:
-            return torch.softmax(self.topic_embed_1 @ self.word_embed, dim=1)
-        elif level == 0:
-            return torch.softmax(self.topic_embed_2 @ self.word_embed, dim=1)
 
     def get_doc_topic_dist(self, level=2):
         """ Theta : (batch_size, n_topics)"""
@@ -436,6 +428,7 @@ class net(nn.Module):
         self.theta_2 = out_2
         self.theta_3 = out_3
 
+        # legacy
         beta_1 = torch.softmax(self.topic_embed @ self.word_embed, dim=1)  # NOTE: phi
         beta_2 = torch.softmax(self.topic_embed_1 @ self.word_embed, dim=1)
         beta_3 = torch.softmax(self.topic_embed_2 @ self.word_embed, dim=1)
@@ -615,11 +608,6 @@ class AMM_no_dag(object):
             self.topic_num_1 = int(f.read())  # FIXME
         self.pi_ave = np.load(f"{self.model_path}/pi_ave.npy")
         print("AMM_no_dag model loaded from {}.".format(model_path))
-
-    def get_topic_dist(self, level=2):
-        # topic_dist = self.Net.get_topic_dist()[self.topics]
-        topic_dist = self.Net.get_topic_word_dist(level)
-        return topic_dist
 
     def get_topic_word(self, level=2, top_k=15, vocab_dict=None):
         topic_dist = self.get_topic_dist(level)
