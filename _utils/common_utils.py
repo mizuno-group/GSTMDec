@@ -88,7 +88,7 @@ def eval_data(model, data_x, data_y, level=1):
     sns.clustermap(corr_df)
     plt.show()
 
-    return deconv_df, y_df, corr_df
+    return deconv_df, y_df, corr_df, output
 
 def calc_deconv_loss(theta_tensor, prop_tensor):
     ext_theta = theta_tensor[:,0:prop_tensor.shape[1]]  # (batch_size, n_cell_types)

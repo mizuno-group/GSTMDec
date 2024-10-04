@@ -20,48 +20,24 @@ from torch import nn
 import torch.optim as optim
 
 # %%
+# Define the MLP model
 class MLP(nn.Module):
-    def __init__(self, input_size, hidden_size1, hidden_size2, output_size):
+    def __init__(self, input_dim=784, hidden_dim=512, output_dim=10):
         super(MLP, self).__init__()
-        self.feature_extractor = nn.Linear(input_size, hidden_size1)
-        self.hidden_layer = nn.Linear(hidden_size1, hidden_size2)
-        self.classifier = nn.Linear(hidden_size2, output_size)
-    
+        self.feature_extractor = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim//2),
+            nn.ReLU()
+        )
+        self.classifier = nn.Linear(hidden_dim//2, output_dim)
+
     def forward(self, x):
-        features = self.extract_features(x)
-        x = torch.relu(self.hidden_layer(features))
-        logits = self.classifier(x)
-        return logits
-    
-    def extract_features(self, x):
-        x = torch.relu(self.feature_extractor(x))
-        return x
+        features = self.feature_extractor(x)
+        return self.classifier(features)
 
-class CosineSimilarityLoss(nn.Module):
-    def __init__(self):
-        super(CosineSimilarityLoss, self).__init__()
-        self.cosine_similarity = nn.CosineSimilarity(dim=1)
-    
-    def forward(self, outputs, targets):
-        # normalize outputs and targets
-        outputs_normalized = torch.nn.functional.normalize(outputs, p=2, dim=1)
-        targets_normalized = torch.nn.functional.normalize(targets, p=2, dim=1)
-        
-        # calculate cosine similarity
-        similarity = self.cosine_similarity(outputs_normalized, targets_normalized)
-        
-        # loss = 1 - similarity
-        loss = 1 - similarity.mean()
-        return loss
+# Function to freeze layers
+def set_requires_grad(model, requires_grad):
+    for param in model.parameters():
+        param.requires_grad = requires_grad
 
-def calc_deconv_loss(theta_tensor, prop_tensor):
-    ext_theta = theta_tensor[:,0:prop_tensor.shape[1]]
-
-    mse = torch.mean((ext_theta - prop_tensor) ** 2)
-    rmse = torch.sqrt(mse)
-    cel = -torch.mean(torch.log(ext_theta) * prop_tensor)
-
-    cos_sim = 1 - F.cosine_similarity(ext_theta, prop_tensor)
-    cos_sim = cos_sim.mean()
-
-    return {'mse':mse, 'rmse':rmse, 'cel':cel, 'cos_sim':cos_sim}
