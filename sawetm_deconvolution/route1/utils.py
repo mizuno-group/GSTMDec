@@ -125,7 +125,7 @@ class Conv1DSoftmax(nn.Module):
         x = torch.mm(w, x.view(-1, x.size(-1)))
         return x
 
-class Conv1DSoftmaxEtm(nn.Module):
+class Conv1DSoftmaxEtm_legacy(nn.Module):
     def __init__(self, voc_size, topic_size, emb_size, last_layer=None):
         super(Conv1DSoftmaxEtm, self).__init__()
         self.voc_size = voc_size
@@ -141,6 +141,35 @@ class Conv1DSoftmaxEtm(nn.Module):
             nn.init.normal_(w1, std=0.02)
             self.rho = Parameter(w1)
 
+        w2 = torch.empty(self.topic_size, self.emb_size)
+        nn.init.normal_(w2, std=0.02)
+        self.alphas = Parameter(w2)
+
+    def forward(self, x, t):
+        if t == 0:
+            w = torch.mm(self.rho, torch.transpose(self.alphas, 0, 1))
+        else:
+            w = torch.mm(self.rho.detach(), torch.transpose(self.alphas, 0, 1))
+
+        w = torch.softmax(w, dim=0)
+        x = torch.mm(w, x.view(-1, x.size(-1)))
+        return x
+
+class Conv1DSoftmaxEtm(nn.Module):
+    def __init__(self, voc_size, topic_size, emb_size, last_layer=None):
+        super(Conv1DSoftmaxEtm, self).__init__()
+        self.voc_size = voc_size
+        self.topic_size = topic_size
+        self.emb_size = emb_size
+
+        if last_layer is None:
+            w1 = torch.empty(self.voc_size, self.emb_size)
+            nn.init.normal_(w1, std=0.02)
+            self.rho = Parameter(w1)
+        else:
+            self.rho = Parameter(last_layer) 
+
+        # initialize alphas
         w2 = torch.empty(self.topic_size, self.emb_size)
         nn.init.normal_(w2, std=0.02)
         self.alphas = Parameter(w2)

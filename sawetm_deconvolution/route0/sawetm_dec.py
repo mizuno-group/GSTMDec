@@ -15,10 +15,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-
 BASE_DIR = '/workspace/mnt/cluster/HDD/azuma/TopicModel_Deconv'
 import sys
-sys.path.append(BASE_DIR+'/github/GSTMDec/sawetm_deconvolution')
+sys.path.append(BASE_DIR+'/github/GSTMDec/sawetm_deconvolution/route0')
 from utils import *
 
 class GBN_model(nn.Module):
@@ -27,7 +26,6 @@ class GBN_model(nn.Module):
         self.args = args
         self.real_min = torch.tensor(1e-30)
         self.wei_shape_max = torch.tensor(10.0).float()
-
         self.wei_shape = torch.tensor(1e-1).float()
 
         self.vocab_size = args.vocab_size
@@ -122,7 +120,7 @@ class GBN_model(nn.Module):
 
             hidden_list[t] = hidden
 
-        for t in range(self.layer_num-1, -1, -1):
+        for t in range(self.layer_num-1, -1, -1):  # e.g. layer_num = 3, t = 2, 1, 0
             if t == self.layer_num - 1:
                 k_rec_temp = torch.max(torch.nn.functional.softplus(self.shape_encoder[t](hidden_list[t])),
                                        self.real_min.to(self.args.device))      # k_rec = 1/k
@@ -163,5 +161,5 @@ class GBN_model(nn.Module):
                 loss[t] = self.KL_GamWei(phi_theta[t], torch.tensor(1.0, dtype=torch.float32).to(self.args.device),
                                          k_rec[t - 1].permute(1, 0), l[t - 1].permute(1, 0))
                 likelihood[t] = self.compute_loss(theta[t - 1], phi_theta[t])
-
+                
         return phi_theta, theta, loss, likelihood
