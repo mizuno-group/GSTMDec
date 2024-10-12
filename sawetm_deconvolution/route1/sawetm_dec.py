@@ -57,11 +57,15 @@ class GBN_model(nn.Module):
         scale_encoder.append(Conv1D(self.topic_size[self.layer_num], 1, self.hidden_size[self.layer_num - 1]))
         self.scale_encoder = nn.ModuleList(scale_encoder)
 
-        # NOTE: custome decoder
+        # NOTE: custom decoder
+        """
         decoder = [Conv1DSoftmaxEtm(self.topic_size[0], self.topic_size[1], self.embed_size, last_layer=self.last_emb_matrix)]
         for i in range(1, self.layer_num):
             decoder.append(Conv1DSoftmaxEtm(self.topic_size[i], self.topic_size[i + 1], self.embed_size))
-        self.decoder = nn.ModuleList(decoder)  # last layer
+        """
+        decoder = [Conv1DSoftmaxEtm(self.topic_size[i], self.topic_size[i + 1], self.embed_size) for i in
+                   range(self.layer_num)]
+        self.decoder = nn.ModuleList(decoder)
 
         for t in range(self.layer_num - 1):
             self.decoder[t + 1].rho = self.decoder[t].alphas
@@ -152,13 +156,14 @@ class GBN_model(nn.Module):
                 phi_theta[t] = self.decoder[t](theta[t], t)
 
         for t in range(self.layer_num + 1):
-            if t == 0:
-                loss[t] = self.compute_loss(x.permute(1, 0), phi_theta[t])  # reconstruction loss
+            if t == 0:  # reconstruction loss
+                loss[t] = self.compute_loss(x.permute(1, 0), phi_theta[t])  
                 likelihood[t] = loss[t]
 
             elif t == self.layer_num:
-                loss[t] = self.KL_GamWei(torch.tensor(1.0, dtype=torch.float32).to(self.args.device), torch.tensor(1.0, dtype=torch.float32).to(self.args.device),
-                                             k_rec[t - 1].permute(1, 0), l[t - 1].permute(1, 0))
+                loss[t] = self.KL_GamWei(torch.tensor(1.0, dtype=torch.float32).to(self.args.device), 
+                                         torch.tensor(1.0, dtype=torch.float32).to(self.args.device),
+                                         k_rec[t - 1].permute(1, 0), l[t - 1].permute(1, 0))
                 likelihood[t] = loss[t]
 
             else:
@@ -167,3 +172,42 @@ class GBN_model(nn.Module):
                 likelihood[t] = self.compute_loss(theta[t - 1], phi_theta[t])
                 
         return phi_theta, theta, loss, likelihood
+
+
+# %%
+def get_top_n(phi, top_n, voc):
+    top_n_words = ''
+    idx = np.argsort(-phi)  # descending
+    for i in range(top_n):
+        index = idx[i]
+        top_n_words += voc[index]
+        top_n_words += ' '
+    return top_n_words
+
+def vision_phi(Phi, outpath='phi_output', top_n=50, voc=None):
+        if voc is not None:
+            if not os.path.exists(outpath):
+                os.makedirs(outpath)
+            phi = 1
+            for num, phi_layer in enumerate(Phi):
+                phi = np.dot(phi, phi_layer)
+                phi_k = phi.shape[1]
+                path = os.path.join(outpath, 'phi' + str(num) + '.txt')
+                f = open(path, 'w')
+                for each in range(phi_k):
+                    top_n_words = get_top_n(phi[:, each], top_n, voc)
+                    f.write(top_n_words)
+                    f.write('\n')
+                f.close()
+        else:
+            print('voc need !!')
+
+def vis_txt(model, voc, top_n=50, outpath='phi_output'):
+    Phi = []
+    for t in range(model.layer_num):
+        w_t = torch.mm(model.decoder[t].rho, torch.transpose(model.decoder[t].alphas, 0, 1))
+        phi_t = torch.softmax(w_t, dim=0).cpu().detach().numpy()
+        print(t,phi_t.shape)
+        Phi.append(phi_t)
+
+    vision_phi(Phi, outpath=outpath, top_n=top_n, voc=voc)
