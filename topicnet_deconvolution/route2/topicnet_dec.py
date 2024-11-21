@@ -15,7 +15,10 @@ class GBN_model(nn.Module):
         self.real_min = torch.tensor(1e-30)
         self.wei_shape_max = torch.tensor(1e8).float()  # torch.tensor(10.0).float()
         self.wei_shape = torch.tensor(1e-1).float()
-        self.beta = 1.0
+        if args.beta is not None:
+            self.beta = args.beta
+        else:
+            self.beta = 10
 
         self.vocab_size = args.vocab_size
         self.hidden_size = args.hidden_size
@@ -165,10 +168,11 @@ class GBN_model(nn.Module):
                 one = torch.ones_like(self.graph[t])
                 throshold[t] = torch.min(torch.where(self.graph[t] > 0, zero, one) * KL_dis[t], dim=0)[0] \
                                 - torch.max(torch.where(self.graph[t] > 0, one, zero) * KL_dis[t], dim=0)[0]
-                graph_kl_loss[t] = 10*torch.mean(torch.relu(self.margin - throshold[t]))
+                graph_kl_loss[t] = self.beta*torch.mean(torch.relu(self.margin - throshold[t]))
 
                 likelihood[t] = self.compute_loss(x.permute(1, 0), phi_theta[t])
-                loss[t] = likelihood[t] + (self.beta * graph_kl_loss[t])
+                #loss[t] = likelihood[t] + (self.beta * graph_kl_loss[t])
+                loss[t] = likelihood[t]
 
             elif t == self.layer_num:  # Calculation of KL divergence based on gamma and Weibull distributions.
                 loss[t] = self.KL_GamWei(torch.tensor(1.0, dtype=torch.float32).cuda(), torch.tensor(1.0, dtype=torch.float32).cuda(),
@@ -180,11 +184,12 @@ class GBN_model(nn.Module):
                 one = torch.ones_like(self.graph[t])
                 throshold[t] = torch.min(torch.where(self.graph[t] > 0, zero, one) * KL_dis[t], dim=0)[0] \
                                - torch.max(torch.where(self.graph[t] > 0, one, zero) * KL_dis[t], dim=0)[0]
-                graph_kl_loss[t] = 10*torch.mean(torch.relu(self.margin - throshold[t]))
+                graph_kl_loss[t] = self.beta*torch.mean(torch.relu(self.margin - throshold[t]))
 
                 likelihood[t] = self.KL_GamWei(phi_theta[t], torch.tensor(1.0, dtype=torch.float32).cuda(),
                                               k_rec[t - 1].permute(1, 0), l[t - 1].permute(1, 0))
 
-                loss[t] = likelihood[t] + (self.beta * graph_kl_loss[t])
+                #loss[t] = likelihood[t] + (self.beta * graph_kl_loss[t])
+                loss[t] = likelihood[t]
 
         return phi_theta, theta, loss, likelihood, graph_kl_loss
