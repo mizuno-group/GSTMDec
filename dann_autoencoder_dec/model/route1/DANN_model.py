@@ -33,7 +33,7 @@ class DecoderBlock(nn.Module):
         return out
 
 class DANN(object):
-    def __init__(self, option_list):
+    def __init__(self, option_list,celltype_num=None,labels=None,used_features=None,seed=2021):
         self.num_epochs = option_list['epochs']
         self.batch_size = option_list['batch_size']
         self.target_type = option_list['target_type']
@@ -41,7 +41,7 @@ class DANN(object):
         self.celltype_num = None
         self.labels = None
         self.used_features = None
-        self.seed = 2021
+        self.seed = seed
         self.outdir = option_list['SaveResultsDir']
 
         cudnn.deterministic = True
@@ -114,11 +114,13 @@ class DANN(object):
                                           {'params': self.discriminator_da.parameters()}], lr=self.learning_rate)
         
         criterion_da = nn.BCELoss().cuda()
-        source_label = torch.ones(self.batch_size).unsqueeze(1).cuda()   # 定义source domain label为1
-        target_label = torch.zeros(self.batch_size).unsqueeze(1).cuda()  # 定义target domain label为0
+        source_label = torch.ones(self.batch_size).unsqueeze(1).cuda()   # define source domain label as 1
+        target_label = torch.zeros(self.batch_size).unsqueeze(1).cuda()  # define target domain label as 0
         
-        metric_logger = defaultdict(list) 
+        self.metric_logger = defaultdict(list) 
 
+        best_pred_loss = 1e10
+        update_flag = 0
         for epoch in range(self.num_epochs):
             self.model_da.train()
 
@@ -165,27 +167,48 @@ class DANN(object):
                 optimizer_da2.step()
 
             pred_loss_epoch = pred_loss_epoch/(batch_idx + 1)
-            metric_logger['pred_loss'].append(pred_loss_epoch)
+            self.metric_logger['pred_loss'].append(pred_loss_epoch)
             disc_loss_epoch = disc_loss_epoch/(batch_idx + 1)
-            metric_logger['disc_loss'].append(disc_loss_epoch)
+            self.metric_logger['disc_loss'].append(disc_loss_epoch)
             disc_loss_DA_epoch = disc_loss_DA_epoch/(batch_idx + 1)
-            metric_logger['disc_loss_DA'].append(disc_loss_DA_epoch)
+            self.metric_logger['disc_loss_DA'].append(disc_loss_DA_epoch)
         
             if (epoch+1) % 10 == 0:
-                print('============= Epoch {:02d}/{:02d} in stage3 ============='.format(epoch + 1, self.num_epochs))
+                print('============= Epoch {:02d}/{:02d} ============='.format(epoch + 1, self.num_epochs))
                 print("pred_loss=%f, disc_loss=%f, disc_loss_DA=%f" % (pred_loss_epoch, disc_loss_epoch, disc_loss_DA_epoch))
                 if self.target_type == "simulated":
                     ### model validation on target data ###
                     target_preds, ground_truth = self.prediction()
                     epoch_ccc, epoch_rmse, epoch_corr = compute_metrics(target_preds, ground_truth)
-                    metric_logger['target_ccc'].append(epoch_ccc)
-                    metric_logger['target_rmse'].append(epoch_rmse)
-                    metric_logger['target_corr'].append(epoch_corr)
+                    self.metric_logger['target_ccc'].append(epoch_ccc)
+                    self.metric_logger['target_rmse'].append(epoch_rmse)
+                    self.metric_logger['target_corr'].append(epoch_corr)
+                
+                # save checkpoint
+                if pred_loss_epoch < best_pred_loss:
+                    best_pred_loss = pred_loss_epoch  # update
+                    update_flag = 0
+                    torch.save(self.model_da.state_dict(), os.path.join(self.outdir, 'best_model.pth'))
+                    self.metric_logger['best_epoch'] = epoch + 1
+                    print("Save model at epoch %d" % (epoch+1))
+                else:
+                    update_flag += 1
+                    # early stopping
+                    if update_flag == 10:
+                        print("Early stopping at epoch %d" % (epoch+1))
+                        break
 
+        """ TODO: remove
         if self.target_type == "simulated":
-            SaveLossPlot(self.outdir, metric_logger, loss_type = ['pred_loss','disc_loss','disc_loss_DA','target_ccc','target_rmse','target_corr'], output_prex = 'Loss_metric_plot_stage3')
+            SaveLossPlot(self.outdir, self.metric_logger, loss_type = ['pred_loss','disc_loss','disc_loss_DA','target_ccc','target_rmse','target_corr'], output_prex = 'Loss_metric_plot_stage3')
         elif self.target_type == "real":
-            SaveLossPlot(self.outdir, metric_logger, loss_type = ['pred_loss','disc_loss','disc_loss_DA'], output_prex = 'Loss_metric_plot_stage3')
+            SaveLossPlot(self.outdir, self.etric_logger, loss_type = ['pred_loss','disc_loss','disc_loss_DA'], output_prex = 'Loss_metric_plot_stage3')
+        """
+    
+    def load_checkpoint(self, model_path):
+        self.model_da = self.DANN_model(self.celltype_num).cuda()
+        self.model_da.load_state_dict(torch.load(model_path))
+        self.model_da.eval()
             
     def prediction(self):
         self.model_da.eval()
@@ -197,6 +220,6 @@ class DANN(object):
             gt = frac if gt is None else np.concatenate((gt, frac), axis=0)
 
         target_preds = pd.DataFrame(preds, columns=self.labels)
-        ground_truth = pd.DataFrame(gt, columns=self.labels)
+        ground_truth = pd.DataFrame(gt, columns=self.labels)  # random ratio is output if "real"
         return target_preds, ground_truth
     
