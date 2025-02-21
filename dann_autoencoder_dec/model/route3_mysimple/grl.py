@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Created on 2025-02-15 (Sat) 14:35:22
+Created on 2025-02-21 (Fri) 09:06:45
 
-Simple Autoencoder Model for Deconvolution
-- Basic architecture
+Domain adaptation with Gradient Reversal Layer (GRL)
 
 @author: I.Azuma
 """
@@ -13,12 +12,15 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from collections import defaultdict
+from sklearn.metrics import roc_auc_score
 
 import torch
 import torch.nn as nn
 import torch.utils.data as Data
 import torch.nn.functional  as F
 import torch.backends.cudnn as cudnn
+
+from torchviz import make_dot
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import TensorDataset
 
@@ -55,12 +57,17 @@ class LossFunctions:
         deconv_loss = deconv_loss_dic['cos_sim'] + 0.0*deconv_loss_dic['rmse']
 
         return deconv_loss
+    
+    def L1_loss(self, preds, gt):
+        loss = torch.mean(torch.reshape(torch.square(preds - gt), (-1,)))
+        return loss
 
 
 class EncoderBlock(nn.Module):
     def __init__(self, in_dim, out_dim, do_rates):
         super(EncoderBlock, self).__init__()
         self.layer = nn.Sequential(nn.Linear(in_dim, out_dim),
+                                   #nn.BatchNorm1d(out_dim),
                                    nn.LeakyReLU(0.2, inplace=True),
                                    nn.Dropout(p=do_rates, inplace=False))
     def forward(self, x):
@@ -71,11 +78,33 @@ class DecoderBlock(nn.Module):
     def __init__(self, in_dim, out_dim, do_rates):
         super(DecoderBlock, self).__init__()
         self.layer = nn.Sequential(nn.Linear(in_dim, out_dim),
+                                   #nn.BatchNorm1d(out_dim),
                                    nn.LeakyReLU(0.2, inplace=True),
                                    nn.Dropout(p=do_rates, inplace=False))
     def forward(self, x):
         out = self.layer(x)
         return out
+
+# GRL (Gradient Reversal Layer)
+class GradientReversalLayer(torch.autograd.Function):
+    @staticmethod
+    def forward(context, x, constant):
+        context.constant = constant
+        return x.view_as(x) * constant
+
+    @staticmethod
+    def backward(context, grad):
+        return grad.neg() * context.constant, None
+
+"""
+class GRL(nn.Module):
+    def __init__(self, alpha=1.0):
+        super(GRL, self).__init__()
+        self.alpha = alpha
+
+    def forward(self, x):
+        return GradientReversalLayer.apply(x, self.alpha)
+"""
 
 class MultiTaskAutoEncoder(nn.Module):
     def __init__(self, option_list, seed=42):
@@ -89,9 +118,13 @@ class MultiTaskAutoEncoder(nn.Module):
         self.lr = option_list['learning_rate']
         self.early_stop = option_list['early_stop']
         self.outdir = option_list['SaveResultsDir']
+        self.pred_loss_type = option_list['pred_loss_type']
+        self.loss_ref = option_list['loss_ref']
+        assert self.loss_ref in ['pred_loss', 'total_loss'], "!! Invalid loss reference !!"
 
         self.rec_w = option_list['rec_w']
         self.pred_w = option_list['pred_w']
+        self.disc_w = option_list['disc_w']
 
         self.losses = LossFunctions()
 
@@ -99,95 +132,39 @@ class MultiTaskAutoEncoder(nn.Module):
         torch.cuda.manual_seed_all(self.seed)
         torch.manual_seed(self.seed)
         random.seed(self.seed)
-    
-    def MTAE_model(self):
+
         self.encoder = nn.Sequential(EncoderBlock(self.feature_num, 512, 0), 
                                      EncoderBlock(512, self.latent_dim, 0.2))
                                      
         self.decoder = nn.Sequential(DecoderBlock(self.latent_dim, 512, 0.2),
                                      DecoderBlock(512, self.feature_num, 0))
 
-        self.predictor = nn.Sequential(EncoderBlock(self.latent_dim, 128, 0.2),
-                                       nn.Linear(128, self.celltype_num),
+        self.predictor = nn.Sequential(EncoderBlock(self.latent_dim, 64, 0.2),
+                                       nn.Linear(64, self.celltype_num),
                                        nn.Softmax(dim=1))
+        
+        self.discriminator = nn.Sequential(nn.Linear(self.latent_dim, 64),
+                                           nn.BatchNorm1d(64),
+                                           nn.LeakyReLU(0.2, inplace=True),
+                                           nn.Dropout(p=0.2, inplace=False),
+                                           nn.Linear(64, 1),
+                                           nn.Sigmoid()) 
 
-        model_da = nn.ModuleList([])
-        model_da.append(self.encoder)
-        model_da.append(self.decoder)
-        model_da.append(self.predictor)
-        return model_da
+    
+    def forward(self, x, alpha=1.0):
+        batch_size = x.size(0)
+        emb = self.encoder(x).view(batch_size, -1)
 
+        rec = self.decoder(emb)
+        pred = self.predictor(emb)
 
-    def train(self, source_data, target_data):
-        ### prepare model structure ###
-        self.prepare_dataloader(source_data, target_data, self.batch_size)
-        self.model_da = self.MTAE_model().cuda()
+        domain_emb = GradientReversalLayer.apply(emb, alpha)
+        domain = self.discriminator(domain_emb)
 
-        # setup optimizer
-        optimizer = torch.optim.Adam([{'params': self.encoder.parameters()},
-                                      {'params': self.decoder.parameters()},
-                                      {'params': self.predictor.parameters()},],
-                                      lr=self.lr)
+        return rec, pred, domain
 
-        self.metric_logger = defaultdict(list) 
-        best_loss = 1e10  
-        update_flag = 0  
-        for epoch in range(self.num_epochs):
-            self.model_da.train()
-            train_target_iterator = iter(self.train_target_loader)
-            rec_loss_epoch, pred_loss_epoch = 0., 0.
-            for batch_idx, (source_x, source_y) in enumerate(self.train_source_loader):
-                target_x = next(iter(self.test_target_loader))[0]  # NOTE: without shuffle
-                #target_x = next(iter(train_target_loader))[0]   # NOTE: with shuffle
-
-                source_emb = self.encoder(source_x.cuda())
-                target_emb = self.encoder(target_x.cuda())
-                source_pred = self.predictor(source_emb)
-
-                # calculate reconstruction loss
-                source_rec = self.decoder(source_emb)
-                target_rec = self.decoder(target_emb)
-                rec_loss = self.losses.reconstruction_loss(source_x.cuda(), source_rec, rec_type='mse') + self.losses.reconstruction_loss(target_x.cuda(), target_rec, rec_type='mse')
-                #rec_loss = F.mse_loss(source_rec, source_x.cuda()) + F.mse_loss(target_rec, target_x.cuda())
-                rec_loss_epoch += rec_loss.data.item()
-
-                # calculate prediction loss
-                pred_loss = self.losses.summarize_loss(source_pred, source_y.cuda())
-                pred_loss_epoch += pred_loss.data.item()
-
-                loss = (self.rec_w*rec_loss) + (self.pred_w*pred_loss)
-
-                # update weights
-                optimizer.zero_grad()
-                loss.backward(retain_graph=True)
-                optimizer.step()
-            
-            rec_loss_epoch = self.rec_w * rec_loss_epoch / len(self.train_source_loader)
-            pred_loss_epoch = self.pred_w * pred_loss_epoch / len(self.train_source_loader)
-            loss_all = rec_loss_epoch + pred_loss_epoch
-
-            self.metric_logger['rec_loss'].append(rec_loss_epoch)
-            self.metric_logger['pred_loss'].append(pred_loss_epoch)
-
-            if epoch % 10 == 0:
-                print(f"Epoch:{epoch}, Loss:{loss_all:.3f}, rec:{rec_loss_epoch:.3f}, pred:{pred_loss_epoch:.3f}")
-
-                # save best model
-                if pred_loss_epoch < best_loss:
-                    update_flag = 0
-                    best_loss = pred_loss_epoch
-                    self.metric_logger['best_epoch'] = epoch
-                    torch.save(self.model_da.state_dict(), os.path.join(self.outdir, 'best_model.pth'))
-                    # print("Save model at epoch %d" % (epoch))
-                else:
-                    update_flag += 1
-                    # early stopping
-                    if update_flag == self.early_stop:
-                        print("Early stopping at epoch %d" % (epoch+1))
-                        break
 
     def load_checkpoint(self, model_path):
-        self.model_da = self.MTAE_model().cuda()
         self.model_da.load_state_dict(torch.load(model_path))
         self.model_da.eval()
 
@@ -237,6 +214,7 @@ class MultiTaskAutoEncoder(nn.Module):
         target_dataset = Data.TensorDataset(te_data, te_labels)
         self.train_target_loader = DataLoader(dataset=target_dataset, batch_size=batch_size, shuffle=True, worker_init_fn=seed_worker, generator=g)
         self.test_target_loader = Data.DataLoader(dataset=target_dataset, batch_size=batch_size, shuffle=False)
+
 
 def preprocess(trainingdatapath, source='data6k', target='sdy67', n_samples=None, n_vtop=None):
     assert target in ['sdy67', 'GSE65133', 'donorA', 'donorC', 'data6k', 'data8k']
@@ -298,3 +276,4 @@ def set_random_seed(seed):
     np.random.seed(seed)
     cudnn.deterministic = True
     cudnn.benchmark = False
+
