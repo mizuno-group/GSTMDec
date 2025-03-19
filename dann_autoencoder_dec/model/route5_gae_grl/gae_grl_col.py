@@ -4,6 +4,12 @@ Created on 2025-02-21 (Fri) 09:06:45
 
 Domain adaptation with Gradient Reversal Layer (GRL)
 
+previous version (route4)
+out_mean = torch.mean(out, dim=2) 
+
+this version (route5)
+out_mean = torch.mean(out2, dim=2) 
+
 @author: I.Azuma
 """
 import os
@@ -140,23 +146,6 @@ class EncoderBlock(nn.Module):
         out = self.layer(x)
         return out
 
-"""
-class EmbeddingBlock(nn.Module):
-    def __init__(self, feature_num, hidden_dim, latent_dim):
-        super().__init__()
-        # hidden_dim --> 1
-        self.compress_hidden = nn.Linear(hidden_dim, 1)
-        # feature_num --> latent_dim
-        self.reduce_feature = nn.Linear(feature_num, latent_dim)
-    
-    def forward(self, x):
-        # x: (batch_size, feature_num, hidden_dim)
-        x = self.compress_hidden(x)  # (batch_size, feature_num, 1)
-        x = x.squeeze(-1)  # (batch_size, feature_num)
-        x = self.reduce_feature(x)  # (batch_size, latent_dim)
-        return x
-"""
-
 # GRL (Gradient Reversal Layer)
 class GradientReversalLayer(torch.autograd.Function):
     @staticmethod
@@ -221,7 +210,6 @@ class MultiTaskAutoEncoder(nn.Module):
 
         self.embedder = nn.Sequential(EncoderBlock(self.feature_num, 512, 0), 
                                       EncoderBlock(512, self.latent_dim, 0.2))
-        #self.embedder = EmbeddingBlock(self.feature_num, self.hidden_dim, self.latent_dim)
 
         self.predictor = nn.Sequential(EncoderBlock(self.latent_dim, 64, 0.2),
                                        nn.Linear(64, self.celltype_num),
@@ -248,12 +236,8 @@ class MultiTaskAutoEncoder(nn.Module):
         rec = self.decoder(out2)
         
         # 3. Mean embedding (batch_size, feature_num, hidden_dim) --> (batch_size, feature_num)
-        out_mean = torch.mean(out, dim=2)
+        out_mean = torch.mean(out2, dim=2)  # NOTE: route5
         emb = self.embedder(out_mean)  # (batch_size, latent_dim)
-        """
-        # 3. Embedding (batch_size, feature_num, hidden_dim) --> (batch_size, feature_num)
-        emb = self.embedder(out)
-        """
         
         # 3. Predictor
         pred = self.predictor(emb)
