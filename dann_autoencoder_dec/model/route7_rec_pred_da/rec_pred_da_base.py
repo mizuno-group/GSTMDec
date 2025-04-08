@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Created on 2025-02-21 (Fri) 09:06:45
+Created on 2025-04-07 (Mon) 16:48:37
 
-Domain adaptation with Gradient Reversal Layer (GRL)
+Model
+- Reconstruction
+    - without estimating gene regulatory network (included in route6)
+- Prediction (deconvolution)
+- Domain Adaptation
 
 @author: I.Azuma
 """
@@ -53,14 +57,6 @@ class LossFunctions:
             raise Exception
         return loss
     
-    def dag_rec_loss(self, real, predicted):
-        loss = torch.square(torch.norm(real - predicted, p=2))
-
-        n = real.shape[0]
-        loss = (0.5/n) * loss
-
-        return loss
-    
     def summarize_loss(self, theta_tensor, prop_tensor):
         # deconvolution loss
         assert theta_tensor.shape[0] == prop_tensor.shape[0], "Batch size is different"
@@ -72,69 +68,23 @@ class LossFunctions:
     def L1_loss(self, preds, gt):
         loss = torch.mean(torch.reshape(torch.square(preds - gt), (-1,)))
         return loss
-    
-    def compute_h(self, w_adj):
-        d = w_adj.shape[0]
-        h = torch.trace(torch.matrix_exp(w_adj * w_adj)) - d
-
-        return h
-    
-    def dag_loss(self, rec_mse, w_adj, l1_penalty, alpha, rho):
-        curr_h = self.compute_h(w_adj)
-        loss = rec_mse + l1_penalty * torch.norm(w_adj, p=1) \
-            + alpha * curr_h + 0.5 * rho * curr_h * curr_h
-        
-        return loss
-
-class MLP(nn.Module):
-    """
-    Feed-forward neural networks----MLP
-
-    """
-
-    def __init__(self, input_dim, layers, units, output_dim,
-                 activation=None, device=None) -> None:
-        super(MLP, self).__init__()
-        # self.desc = desc
-        self.input_dim = input_dim
-        self.layers = layers
-        self.units = units
-        self.output_dim = output_dim
-        self.activation = activation
-        self.device = device
-
-        mlp = []
-        for i in range(layers):
-            input_size = units
-            if i == 0:
-                input_size = input_dim
-            weight = nn.Linear(in_features=input_size,
-                               out_features=self.units,
-                               bias=True,
-                               device=self.device)
-            mlp.append(weight)
-            if activation is not None:
-                mlp.append(activation)
-        out_layer = nn.Linear(in_features=self.units,
-                              out_features=self.output_dim,
-                              bias=True,
-                              device=self.device)
-        mlp.append(out_layer)
-
-        self.mlp = nn.Sequential(*mlp)
-
-    def forward(self, x) -> torch.Tensor:
-
-        x_ = x.reshape(-1, self.input_dim)
-        output = self.mlp(x_)
-
-        return output.reshape(x.shape[0], -1, self.output_dim)
 
 class EncoderBlock(nn.Module):
     def __init__(self, in_dim, out_dim, do_rates):
         super(EncoderBlock, self).__init__()
         self.layer = nn.Sequential(nn.Linear(in_dim, out_dim),
-                                   #nn.BatchNorm1d(out_dim),
+                                   nn.BatchNorm1d(out_dim),
+                                   nn.LeakyReLU(0.2, inplace=True),
+                                   nn.Dropout(p=do_rates, inplace=False))
+    def forward(self, x):
+        out = self.layer(x)
+        return out
+
+class DecoderBlock(nn.Module):
+    def __init__(self, in_dim, out_dim, do_rates):
+        super(DecoderBlock, self).__init__()
+        self.layer = nn.Sequential(nn.Linear(in_dim, out_dim),
+                                   nn.BatchNorm1d(out_dim),
                                    nn.LeakyReLU(0.2, inplace=True),
                                    nn.Dropout(p=do_rates, inplace=False))
     def forward(self, x):
@@ -161,9 +111,7 @@ class MultiTaskAutoEncoder(nn.Module):
         self.batch_size = option_list['batch_size']
         self.feature_num = option_list['feature_num']
         self.latent_dim = option_list['latent_dim']
-        self.hidden_dim = option_list['hidden_dim']
         self.d = option_list['d']
-        self.hidden_layers = option_list['hidden_layers']
         self.celltype_num = option_list['celltype_num']
         self.num_epochs = option_list['epochs']
         self.lr = option_list['learning_rate']
@@ -171,7 +119,7 @@ class MultiTaskAutoEncoder(nn.Module):
         self.outdir = option_list['SaveResultsDir']
         self.pred_loss_type = option_list['pred_loss_type']
 
-        self.dag_w = option_list['dag_w']
+        self.rec_w = option_list['rec_w']
         self.pred_w = option_list['pred_w']
         self.disc_w = option_list['disc_w']
 
@@ -179,42 +127,21 @@ class MultiTaskAutoEncoder(nn.Module):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.activation = torch.nn.LeakyReLU(0.05)  # NOTE: default nn.ReLU()
 
-        W = torch.nn.init.uniform_(torch.empty(self.d, self.d,),a=-0.1, b=0.1)
-        self.w = torch.nn.Parameter(W.to(device=self.device))
-
         torch.cuda.manual_seed_all(self.seed)
         torch.manual_seed(self.seed)
         random.seed(self.seed)
 
-        self.encoder = MLP(input_dim=1,
-                           layers=self.hidden_layers,
-                           units=self.hidden_dim,
-                           output_dim=self.hidden_dim,
-                           activation=self.activation,
-                           device=self.device)
-        self.decoder = MLP(input_dim=self.hidden_dim,
-                           layers=self.hidden_layers,
-                           units=self.hidden_dim,
-                           output_dim=1,
-                           activation=self.activation,
-                           device=self.device)
-        
-        w = torch.nn.init.uniform_(torch.empty(self.d, self.d,),
-                                   a=-0.1, b=0.1)
-        self.w = torch.nn.Parameter(w.to(device=self.device))
-
-        self.embedder = nn.Sequential(EncoderBlock(self.feature_num, 512, 0), 
-                                      EncoderBlock(512, self.latent_dim, 0.2))
-        #self.embedder = EmbeddingBlock(self.feature_num, self.hidden_dim, self.latent_dim)
+        self.encoder = nn.Sequential(EncoderBlock(self.feature_num, 512, 0), 
+                                     EncoderBlock(512, self.latent_dim, 0.2))
+                                     
+        self.decoder = nn.Sequential(DecoderBlock(self.latent_dim, 512, 0.2),
+                                     DecoderBlock(512, self.feature_num, 0))
 
         self.predictor = nn.Sequential(EncoderBlock(self.latent_dim, 64, 0.2),
                                        nn.Linear(64, self.celltype_num),
                                        nn.Softmax(dim=1))
         
-        self.discriminator = nn.Sequential(nn.Linear(self.latent_dim, 64),
-                                           nn.BatchNorm1d(64),
-                                           nn.LeakyReLU(0.2, inplace=True),
-                                           nn.Dropout(p=0.2, inplace=False),
+        self.discriminator = nn.Sequential(EncoderBlock(self.latent_dim, 64, 0.2),
                                            nn.Linear(64, 1),
                                            nn.Sigmoid()) 
 
@@ -223,17 +150,10 @@ class MultiTaskAutoEncoder(nn.Module):
         batch_size = x.size(0)
 
         # 1. Encoder
-        x = x.reshape((batch_size, x.size(1), 1))  # x: (batch_size, feature_num, 1)
-        out = self.encoder(x)  # out: (batch_size, feature_num, hidden_dim)
+        emb = self.encoder(x).view(batch_size, -1)
 
         # 2. Decoder
-        self.w_adj = self._preprocess_graph(self.w)
-        out2 = torch.einsum('ijk,jl->ilk', out, self.w_adj)  # emb2: (batch_size, feature_num, hidden_dim)
-        rec = self.decoder(out2)
-        
-        # 3. Mean embedding (batch_size, feature_num, hidden_dim) --> (batch_size, feature_num)
-        out_mean = torch.mean(out, dim=2)
-        emb = self.embedder(out_mean)  # (batch_size, latent_dim)
+        rec = self.decoder(emb)
         
         # 3. Predictor
         pred = self.predictor(emb)
@@ -243,28 +163,6 @@ class MultiTaskAutoEncoder(nn.Module):
         domain = self.discriminator(domain_emb)
 
         return rec, pred, domain
-    
-    def forward_stable(self, data):
-
-        self.w_adj = self._preprocess_graph(self.w)
-
-        x = torch.from_numpy(data).to(self.device)
-        self.n, self.d = x.shape[:2]
-        x = x.reshape((self.n, self.d, 1))
-
-
-        out = self.encoder(x)
-        print("x:", x.shape, "out:", out.shape, "w_adj:", self.w_adj.shape)
-        out = torch.einsum('ijk,jl->ilk', out, self.w_adj)
-        x_est = self.decoder(out)
-
-        mse_loss = torch.square(torch.norm(x - x_est, p=2))
-
-
-        return mse_loss, self.w_adj
-    
-    def _preprocess_graph(self, w_adj):
-        return (1. - torch.eye(w_adj.shape[0], device=self.device)) * w_adj
 
 
     def load_checkpoint(self, model_path):
@@ -353,8 +251,6 @@ def preprocess(trainingdatapath, source='data6k', target='sdy67',
 
     train_y = train.obs[target_cells]
     test_y = test.obs[target_cells]
-    #train_y = train.obs.iloc[:,:-2]
-    #test_y = test.obs.iloc[:,:-2]
 
     
     if n_vtop is None:
