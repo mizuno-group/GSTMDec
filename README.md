@@ -1,5 +1,6 @@
-# GSTMDec: Guided STM Deconvolution
-Guided STM Deconvolution
+# TRIAD: Tissue-adaptive Representation via Integrated graph Autoencoder for Deconvolution
+Tissue-adaptive Representation via Integrated graph Autoencoder for Deconvolution
+
 
 ## Publication
 - Not yet.
