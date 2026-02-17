@@ -2,26 +2,28 @@
 """
 Created on 2026-02-15 (Sun) 11:57:24
 
+Trainer for DALN
+
 @author: I.Azuma
 """
 
 import os
+import gc
+import sys
 import numpy as np
 import pandas as pd
-
 from itertools import cycle
 from collections import defaultdict
 from sklearn.metrics import roc_auc_score
+from pathlib import Path
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import torch.utils.data as Data
 
-# Import DANN-based model and dataset utilities
-from da_models.dann.dann_model import *
-from _utils.dataset import *
-
-import sys
-from pathlib import Path
+# Import DALN-based model and dataset utilities
+# Ensure these paths are correct in your environment
 current_file = Path(__file__).resolve()
 model_root = current_file.parents[2]
 utils_path = model_root.parent / "deconv-utils"
@@ -29,6 +31,8 @@ utils_path = model_root.parent / "deconv-utils"
 if str(utils_path) not in sys.path:
     sys.path.append(str(utils_path))
 
+from da_models.daln.daln_model import DALN_Deconv
+from _utils.dataset import prep4benchmark, seed_worker
 from src import evaluation as ev
 
 
@@ -95,11 +99,15 @@ class BaseTrainer:
         Create option list for the model and initialize parameters.
         """
         option_list = defaultdict(list)
-        for key, value in vars(self.cfg.dann).items():
+        for key, value in vars(self.cfg.daln).items():
             option_list[key] = value
         option_list['feature_num'] = self.source_data.shape[1]
         option_list['celltype_num'] = len(self.target_cells)
         option_list['seed'] = self.seed
+        
+        # Ensure latent_dim is int
+        if 'latent_dim' in option_list:
+             option_list['latent_dim'] = int(option_list['latent_dim'])
 
         self.option_list = option_list
 
@@ -108,19 +116,22 @@ class BaseTrainer:
         self.update_flag = 0
 
     def train_model(self, logger, eval_mode=False):
-        model = DANN_Deconv(self.option_list).to(self.device)
+        model = DALN_Deconv(self.option_list).to(self.device)
         optimizer = torch.optim.Adam(model.parameters(), lr=model.lr, weight_decay=1e-5)
-        #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=model.num_epochs)
-        #scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda epoch: 0.95 ** epoch)
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=model.lr, total_steps=model.num_epochs, pct_start=0.3, anneal_strategy='cos')
         
-        criterion_da = nn.BCELoss().to(self.device) 
-
+        # Scheduler configuration
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=model.lr, total_steps=model.num_epochs, 
+            pct_start=0.3, anneal_strategy='cos'
+        )
+        
         self.best_loss = float('inf')
         target_iter = cycle(self.train_target_loader)
+        
         for epoch in range(model.num_epochs):
-            loss_dict = self.run_epoch(model, epoch, optimizer, criterion_da, target_iter)
+            loss_dict = self.run_epoch(model, epoch, optimizer, target_iter)
 
+            # Evaluation phase
             if eval_mode is not None:
                 summary_df = self.eval_target(model)
                 loss_dict.update({
@@ -129,6 +140,7 @@ class BaseTrainer:
                     'MAE': summary_df.loc['mean']['MAE'],
                 })
 
+            # Logging
             logger(epoch=epoch, **loss_dict)
 
             # Early stopping & Model Save
@@ -143,93 +155,73 @@ class BaseTrainer:
                     break
             
             if epoch % 10 == 0:
-                print(f"Epoch:{epoch}, Loss:{loss_dict['total_loss']:.3f},  pred:{loss_dict['pred_loss']:.3f}, disc:{loss_dict['disc_loss']:.3f}, disc_auc:{loss_dict['disc_auc']:.3f}")
+                print(f"Epoch:{epoch}, Total:{loss_dict['total_loss']:.3f}, Pred:{loss_dict['pred_loss']:.3f}, Disc(NWD):{loss_dict['nwd_loss']:.3f}")
             
             scheduler.step()
             gc.collect()
         
         torch.save(model.state_dict(), os.path.join(self.cfg.paths.model_path, f'last_model_{self.seed}.pth'))
 
-    def run_epoch(self, model, epoch, optimizer, criterion_da, target_iter):
+    def run_epoch(self, model, epoch, optimizer, target_iter):
         model.train()
         total_pred_loss = 0.
-        total_disc_loss = 0.
-        all_domain_preds = []
-        all_domain_labels = []
-
+        total_nwd_loss = 0.
+        
         n_batches = len(self.train_source_loader)
         
         for batch_idx, (source_x, source_y) in enumerate(self.train_source_loader):
-            # 1. data loading
+            # 1. Data loading
             target_x, _ = next(target_iter)
             source_x, source_y = source_x.to(self.device), source_y.to(self.device)
             target_x = target_x.to(self.device)
 
-            # 2. calculate alpha for GRL
-            p = float(batch_idx + epoch * n_batches) / (model.num_epochs * n_batches)
-            alpha = 2. / (1. + np.exp(-10 * p)) - 1
-
-            # 3. Forward Pass
-            pred_s, domain_s = model(source_x, alpha=alpha)
-            pred_t, domain_t = model(target_x, alpha=alpha)
-
-            # 4. Loss
-            # Prediction Loss (only for source domain)
-            if model.pred_loss_type == 'L1':
-                pred_loss = F.l1_loss(pred_s, source_y)
-            else:
-                pred_loss = model.losses.custom_loss(pred_s, source_y)
-
-            # Domain Loss
-            # label_s=1, label_t=0
-            label_s = torch.ones(source_x.size(0), 1).to(self.device)
-            label_t = torch.zeros(target_x.size(0), 1).to(self.device)
-            
-            loss_ms = criterion_da(domain_s, label_s)
-            loss_mt = criterion_da(domain_t, label_t)
-            disc_loss = loss_ms + loss_mt
+            # 2. Forward Pass
+            pred_s, pred_t, pred_loss, nwd_loss = model(x_s = source_x,
+                                                        y_s = source_y,
+                                                        x_t = target_x)
 
             # Total Loss
-            total_loss = model.pred_w * pred_loss + model.disc_w * disc_loss
+            total_loss = model.pred_w * pred_loss + model.nwd_w * nwd_loss
 
-            # 5. Backward & Optimization
+            # 4. Backward & Optimization
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
 
-            # 6. Logging
+            # 5. Accumulate metrics
             total_pred_loss += pred_loss.item()
-            total_disc_loss += disc_loss.item()
-            all_domain_preds.extend(domain_s.detach().cpu().numpy())
-            all_domain_preds.extend(domain_t.detach().cpu().numpy())
-            all_domain_labels.extend([1]*source_x.size(0) + [0]*target_x.size(0))
+            total_nwd_loss += nwd_loss.item()
 
         # Epoch summary
-        avg_pred = total_pred_loss / n_batches
-        avg_disc = total_disc_loss / n_batches
-        auc = roc_auc_score(all_domain_labels, all_domain_preds)
+        # Avoid division by zero if all batches were skipped
+        if n_batches > 0:
+            avg_pred = total_pred_loss / n_batches
+            avg_nwd = total_nwd_loss / n_batches
+        else:
+            avg_pred = 0.
+            avg_nwd = 0.
 
         return {
             'pred_loss': avg_pred,
-            'disc_loss': avg_disc,
-            'total_loss': avg_pred + avg_disc,
-            'disc_auc': auc
+            'nwd_loss': avg_nwd,
+            'total_loss': avg_pred + avg_nwd,
+            'disc_auc': 0.0 # AUC is not applicable for NWD (Wasserstein distance)
         }
 
     def predict(self, model=None):
         """
-        Make predictions using the trained model.
+        Make predictions using the model.
         """
         if model is None:
             model_path = os.path.join(self.cfg.paths.model_path, f'best_model_{self.seed}.pth')
-            model = DANN_Deconv(self.option_list).cuda()
+            model = DALN_Deconv(self.option_list).cuda()
             model.load_state_dict(torch.load(model_path))
             print("Model loaded from %s" % model_path)
-
+        
         model.eval()
         preds = None
         for batch_idx, (x, y) in enumerate(self.test_target_loader):
-            logits, domain = model(x.cuda(), alpha=1.0)
+            logits, _, _, _ = model(x_s=x.to(self.device), y_s=None, x_t=None)
             logits = logits.detach().cpu().numpy()
             frac = y.detach().cpu().numpy()
             preds = logits if preds is None else np.concatenate((preds, logits), axis=0)
@@ -270,17 +262,15 @@ class BaseTrainer:
 
 class BenchmarkTrainer(BaseTrainer):
     """
-    Trainer for benchmarking. Includes dataset preparation and evaluation metric computation.
+    Trainer for benchmarking. Includes dataset preparation.
     """
     def __init__(self, cfg, seed=42):
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.cfg = cfg
-        self.target_cells = cfg.common.target_cells
-        self.seed = seed
-
+        super().__init__(cfg, seed)
+        
+        # Initialize data and options
         self.set_data()
-        self.build_dataloader(batch_size=cfg.dann.batch_size)
-        self.set_options()
+        self.set_options() # Must be called after set_data to get feature_num
+        self.build_dataloader(batch_size=int(cfg.daln.batch_size))
 
     def set_data(self):
         train_data, test_data, train_y, test_y, gene_names = prep4benchmark(
@@ -300,60 +290,6 @@ class BenchmarkTrainer(BaseTrainer):
         self.gene_names = gene_names
 
     def train_model(self, logger):
-        super().train_model(logger=logger)
-    
-    def target_inference(self, model=None):
-        if model is None:
-            model_path = os.path.join(self.cfg.paths.model_path, f'best_model_{self.seed}.pth')
-            model = DANN_Deconv(self.option_list).cuda()
-            model.load_state_dict(torch.load(model_path))
-            print("Model loaded from %s" % model_path)
-
-        model.eval()
-        preds, gt = None, None
-        for batch_idx, (x, y) in enumerate(self.test_target_loader):
-            logits, domain = model(x.cuda(), alpha=1.0)
-            logits = logits.detach().cpu().numpy()
-            frac = y.detach().cpu().numpy()
-            preds = logits if preds is None else np.concatenate((preds, logits), axis=0)
-            gt = frac if gt is None else np.concatenate((gt, frac), axis=0)
-        final_preds_target = pd.DataFrame(preds, columns=self.target_cells)
-
-        return final_preds_target
-
-
-class InferenceTrainer(BaseTrainer):
-    """
-    Trainer for inference only. Prepares the inference dataset.
-    """
-    def __init__(self, cfg, seed=42):
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.cfg = cfg
-        self.target_cells = cfg.common.target_cells
-        self.seed = seed
-
-        self.set_data()
-        self.build_dataloader(batch_size=cfg.dann.batch_size)
-        self.set_options()
-
-    def set_data(self):
-        train_data, test_data, train_y, gene_names = prep4inference(
-            h5ad_path=self.cfg.paths.h5ad_path,
-            target_path=self.cfg.paths.target_path,
-            source_list=self.cfg.common.source_domain,
-            target=self.cfg.common.target_domain,
-            priority_genes=self.cfg.common.marker_genes,
-            target_cells=self.target_cells,
-            n_samples=self.cfg.common.n_samples,
-            n_vtop=self.cfg.common.n_vtop,
-            target_log_conv=self.cfg.common.target_log_conv,
-            mm_scale=self.cfg.common.mm_scale,
-            seed=self.seed,
-            vtop_mode=self.cfg.common.vtop_mode,
-        )
-        self.source_data = train_data
-        self.target_data = test_data
-        self.gene_names = gene_names
-
-    def train_model(self):
-        super().train_model()
+        # Call the base class training method
+        # We pass eval_mode=True to perform evaluation during training if desired
+        super().train_model(logger=logger, eval_mode=True)
